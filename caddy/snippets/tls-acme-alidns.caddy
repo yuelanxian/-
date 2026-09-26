@@ -1,0 +1,14 @@
+# 域名模式（阿里云 DNS）：Let's Encrypt DNS-01 验证，无需开放 80/443。
+# 凭据来自 secrets/caddy-dns.env：ALIYUN_ACCESS_KEY_ID / ALIYUN_ACCESS_KEY_SECRET（运行时读取）。
+cert_issuer acme {
+	email {$HV_ACME_EMAIL}
+	disable_http_challenge
+	disable_tlsalpn_challenge
+	dns alidns {
+		access_key_id {env.ALIYUN_ACCESS_KEY_ID}
+		access_key_secret {env.ALIYUN_ACCESS_KEY_SECRET}
+	}
+	resolvers 223.5.5.5 119.29.29.29
+	propagation_delay 30s
+	propagation_timeout 10m
+}

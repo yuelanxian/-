@@ -1,0 +1,16 @@
+# HomeVault 叠加文件：域名模式（HV_TLS_MODE=acme-dns）时使用，构建带 DNS 插件的 Caddy。
+# 用法：docker compose -f compose.yaml -f compose.acme.yaml --env-file .env build caddy
+services:
+  caddy:
+    image: homevault/caddy-dns:2.11.4
+    # 本地构建的镜像，永不从仓库拉取（缺失时 `up` 会自动构建）
+    pull_policy: never
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+      args:
+        CADDY_BUILDER_IMAGE: ${CADDY_BUILDER_IMAGE:-docker.io/library/caddy:2.11.4-builder}
+        CADDY_BASE_IMAGE: ${CADDY_IMAGE:-docker.io/library/caddy:2.11.4-alpine}
+        GOPROXY: ${HV_GOPROXY:-https://proxy.golang.org,direct}
+        # 仅当网络存在 TLS 拦截代理时需要：额外根证书的 PEM 文本（一般留空）
+        EXTRA_CA_PEM: ${HV_BUILD_EXTRA_CA_PEM:-}

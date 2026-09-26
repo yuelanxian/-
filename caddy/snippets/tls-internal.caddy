@@ -1,0 +1,5 @@
+# IP 模式：由 Caddy 本地 CA（HomeVault Local CA）签发证书。
+# 根证书：/data/caddy/pki/authorities/local/root.crt（需安装到手机/电脑）。
+# 客户端用 IP 访问时不发送 SNI，default_sni 让 Caddy 选用 HV_HOST 的证书。
+default_sni {$HV_HOST}
+local_certs

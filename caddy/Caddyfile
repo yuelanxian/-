@@ -1,0 +1,46 @@
+# HomeVault Caddy 主配置 — 由 compose 的环境变量填充 {$VAR} 占位符（解析时替换）。
+# 修改后重载：docker compose kill -s USR1 caddy（admin off 时仍有效）。
+# 注意：环境变量只在容器创建时注入；改 .env 后需 `hv up` 重建 caddy 容器。
+{
+	admin off
+	persist_config off
+	skip_install_trust
+	http_port {$HV_HTTP_PORT}
+	https_port {$HV_HTTPS_PORT}
+	servers {
+		# 仅 TCP：不启用 HTTP/3（不发布 UDP 端口）
+		protocols h1 h2
+	}
+	pki {
+		ca local {
+			name "HomeVault Local CA"
+		}
+	}
+	# 证书来源：internal（本地 CA）或 acme-<dns 服务商>（DNS-01，需 compose.acme.yaml 构建的镜像）
+	import snippets/tls-{$HV_TLS_SNIPPET}.caddy
+}
+
+{$HV_SITE_ADDRESSES} {
+	# route 保证按书写顺序执行：abort 必须先于 redir
+	route {
+		@outside not remote_ip {$HV_ALLOWED_CIDRS}
+		abort @outside
+
+		header Strict-Transport-Security "max-age=15552000"
+		header -Server
+		header -X-Powered-By
+
+		redir /.well-known/carddav /remote.php/dav/ 301
+		redir /.well-known/caldav /remote.php/dav/ 301
+
+		# 不限制请求体大小、不缓冲：多 GB 视频直接流式转发给 Nextcloud
+		reverse_proxy app:80 {
+			transport http {
+				keepalive 4s
+			}
+		}
+	}
+}
+
+# 管理界面（Linux + VPN 时为 wg-easy，其余为空）
+import snippets/admin-{$HV_ADMIN_SNIPPET}.caddy
