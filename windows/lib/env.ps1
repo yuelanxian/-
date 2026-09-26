@@ -1,4 +1,4 @@
-# HomeVault Windows CLI - .env reading/writing (comments and order preserved) and derived variables.
+﻿# HomeVault Windows CLI - .env reading/writing (comments and order preserved) and derived variables.
 
 $script:HvEnvCache = $null
 
@@ -59,7 +59,7 @@ function Format-HvEnvValue {
     param([AllowEmptyString()][AllowNull()][string]$Value)
     if ($null -eq $Value) { return '' }
     if ($Value -match "[`r`n]") { throw '.env 的值不能包含换行符。' }
-    if (($Value -match '[\$#"''`]') -or ($Value -ne $Value.Trim())) {
+    if ($Value -match '[\s\$#"''`\\]') {
         if ($Value.IndexOf([char]39) -ge 0) { throw ('.env 的值不能同时包含单引号和特殊字符：' + $Value) }
         return ("'" + $Value + "'")
     }
@@ -177,26 +177,23 @@ function Get-HvEnvDictValue {
 }
 
 function Get-HvCanonicalHosts {
-    # Every name/IP clients may use (order matters: the first one is the canonical URL).
+    # Every name/IP clients may use (the first one is the canonical URL): HV_HOST, HV_EXTRA_HOSTS and,
+    # on Windows in internal-TLS mode with VPN, the tunnel server IP as a fallback (same order as the bash CLI).
     param([System.Collections.IDictionary]$Env, [string]$Platform = 'windows')
     $list = New-Object System.Collections.Generic.List[string]
-    $add = {
-        param($h)
-        $h = ([string]$h).Trim()
-        if ($h -ne '' -and -not $list.Contains($h)) { $list.Add($h) }
-    }
+    $candidates = @()
     $hostName = Get-HvEnvDictValue $Env 'HV_HOST'
-    $lan = Get-HvEnvDictValue $Env 'HV_LAN_IP'
-    if (-not $hostName) { $hostName = $lan }
-    & $add $hostName
+    if (-not $hostName) { $hostName = Get-HvEnvDictValue $Env 'HV_LAN_IP' }
+    $candidates += $hostName
+    $candidates += @((Get-HvEnvDictValue $Env 'HV_EXTRA_HOSTS') -split '[\s,]+')
     $tls = Get-HvEnvDictValue $Env 'HV_TLS_MODE' 'internal'
-    if ($tls -eq 'internal') {
-        & $add $lan
-        $vpnOn = Test-HvTrue (Get-HvEnvDictValue $Env 'HV_VPN_ENABLED' 'true')
-        $cidr = Get-HvEnvDictValue $Env 'HV_VPN_CIDR'
-        if ($Platform -eq 'windows' -and $vpnOn -and $cidr) { & $add (Get-HvVpnServerIp $cidr) }
+    $vpnOn = Test-HvTrue (Get-HvEnvDictValue $Env 'HV_VPN_ENABLED' 'true')
+    $cidr = Get-HvEnvDictValue $Env 'HV_VPN_CIDR'
+    if ($Platform -eq 'windows' -and $tls -eq 'internal' -and $vpnOn -and $cidr) { $candidates += (Get-HvVpnServerIp $cidr) }
+    foreach ($h in $candidates) {
+        $x = ([string]$h).Trim()
+        if ($x -ne '' -and -not $list.Contains($x)) { $list.Add($x) }
     }
-    foreach ($x in ((Get-HvEnvDictValue $Env 'HV_EXTRA_HOSTS') -split '[\s,]+')) { & $add $x }
     return $list.ToArray()
 }
 

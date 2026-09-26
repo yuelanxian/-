@@ -1,0 +1,125 @@
+# Smoke-test stack for the HomeVault panel (NOT the production compose file). Used by run.sh.
+name: hvpanel-smoke
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine}
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: smoke-db-pass-123
+    volumes: [pg:/var/lib/postgresql]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U nextcloud -d nextcloud"]
+      interval: 5s
+      retries: 30
+  redis:
+    image: ${REDIS_IMAGE:-redis:8-alpine}
+    networks: [backend]
+  app:
+    image: ${NEXTCLOUD_IMAGE:-nextcloud:34-apache}
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: smoke-db-pass-123
+      NEXTCLOUD_ADMIN_USER: hvadmin
+      NEXTCLOUD_ADMIN_PASSWORD: Smoke-Admin-Pass-2026!
+      NEXTCLOUD_DATA_DIR: /var/www/data
+      NEXTCLOUD_TRUSTED_DOMAINS: "127.0.0.1 127.0.0.1:38443"
+      APACHE_DISABLE_REWRITE_IP: "1"
+      TRUSTED_PROXIES: ${SMOKE_SUBNET:-172.30.199.0/24}
+      OVERWRITEPROTOCOL: https
+      OVERWRITECLIURL: https://127.0.0.1:38443
+    volumes:
+      - ./data/nc-data:/var/www/data
+      - html:/var/www/html
+    networks: [frontend, backend]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/status.php | grep -q '\"installed\":true'"]
+      interval: 10s
+      retries: 60
+      start_period: 10m
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.11.4-alpine}
+    ports:
+      - "127.0.0.1:38443:38443"
+      - "127.0.0.1:38444:38444"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    networks: [frontend]
+  socket-proxy:
+    image: ${SOCKET_PROXY_IMAGE:-linuxserver/socket-proxy:3.4.5-r0-ls99}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/run]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      CONTAINERS: "1"
+      ALLOW_LOGS: "1"
+      ALLOW_RESTARTS: "1"
+      INFO: "1"
+      VERSION: "1"
+      PING: "1"
+      EVENTS: "0"
+      POST: "0"
+      ALLOW_START: "0"
+      ALLOW_STOP: "0"
+      ALLOW_PAUSE: "0"
+      ALLOW_UNPAUSE: "0"
+      ALLOW_ARCHIVE: "0"
+      ALLOW_EXPORT: "0"
+      ALLOW_CHANGES: "0"
+      ALLOW_TOP: "0"
+      DISABLE_IPV6: "1"
+      LOG_LEVEL: warning
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [dockerapi]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2375/_ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  panel:
+    image: ${PANEL_IMAGE:-homevault/panel:0.1.0}
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [socket-proxy]
+    environment:
+      HV_HOST: 127.0.0.1
+      HV_PUBLIC_URL: https://127.0.0.1:38443
+      NC_INTERNAL_URL: http://app:80
+      DOCKER_HOST: tcp://socket-proxy:2375
+      COMPOSE_PROJECT: hvpanel-smoke
+      PANEL_TRUSTED_PROXIES: ${SMOKE_SUBNET:-172.30.199.0/24}
+      HV_LOG_RETENTION_DAYS: "7"
+      HV_VERSION: "0.1.0-smoke"
+      TZ: Asia/Shanghai
+      ADMIN_RECHECK: 30s
+    volumes:
+      - ./data/logs:/logs:ro
+      - ./data/logs/panel:/logs/panel
+      - ./data/state:/state
+      - ./data/nc-data:/stat/data:ro
+      - ./data/backup:/stat/backup:ro
+      - ./data/photos:/stat/storage/s79bc008a:ro
+      - ./data/storage.conf:/config/storage.conf:ro
+    networks: [frontend, dockerapi]
+networks:
+  frontend:
+    ipam:
+      config: [{subnet: ${SMOKE_SUBNET:-172.30.199.0/24}}]
+  backend:
+    internal: true
+  dockerapi:
+    internal: true
+volumes:
+  pg:
+  html:
+  caddy_data:

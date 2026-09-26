@@ -1,0 +1,53 @@
+# HomeVault CI：静态检查 + 单元测试 + 真实栈端到端测试（Linux Docker，无 WireGuard）
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Tool versions
+        run: |
+          bash --version | head -n1
+          shellcheck --version | head -n2 || true
+          docker version --format 'engine {{.Server.Version}}'
+          docker compose version
+      - name: Install shellcheck (if missing)
+        run: command -v shellcheck || (sudo apt-get update && sudo apt-get install -y shellcheck)
+      - name: Unit tests (bash CLI)
+        run: tests/bash/run.sh
+      - name: Static checks (tests/lint.sh)
+        run: tests/lint.sh
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Docker info
+        run: |
+          docker version
+          docker compose version
+          df -h / /var/lib/docker || true
+      - name: End-to-end (tests/e2e.sh)
+        # e2e 需要 root（数据目录属主 uid 33）；只使用临时目录和一次性密钥，不缓存任何内容
+        run: sudo -E env "PATH=$PATH" tests/e2e.sh

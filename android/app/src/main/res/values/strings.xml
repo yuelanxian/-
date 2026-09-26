@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="zh">
+    <string name="app_name">HomeVault 家庭归档</string>
+    <string name="toolbar_title">HomeVault</string>
+
+    <!-- 首次设置 / 更换服务器 -->
+    <string name="setup_title">连接服务器</string>
+    <string name="setup_intro">输入 HomeVault 管理面板的地址。服务器安装完成时会显示这个地址，默认端口是 9443，例如 https://192.168.1.10:9443。\n\n在家连上家里的 Wi-Fi 即可使用；在外面请先打开 VPN（WG Tunnel 或 WireGuard）。</string>
+    <string name="setup_panel_label">管理面板地址</string>
+    <string name="setup_panel_hint">https://192.168.1.10:9443</string>
+    <string name="setup_nextcloud_label">Nextcloud 网页地址（可选）</string>
+    <string name="setup_nextcloud_hint">留空＝同一服务器的 https 默认端口</string>
+    <string name="setup_test">测试连接</string>
+    <string name="setup_save">保存并打开</string>
+    <string name="setup_cert_help">证书安装说明</string>
+    <string name="setup_open_vpn">打开 VPN 应用</string>
+    <string name="setup_testing">正在连接 %1$s …</string>
+    <string name="setup_port_added">未填写端口，已使用管理面板默认端口 9443。</string>
+
+    <string name="url_error_empty">请输入管理面板地址</string>
+    <string name="url_error_not_https">只支持 https:// 地址（HomeVault 始终使用加密连接）</string>
+    <string name="url_error_invalid">地址格式不正确，例如 https://192.168.1.10:9443</string>
+    <string name="url_error_no_host">地址中缺少服务器的 IP 或域名</string>
+    <string name="url_error_credentials">地址中不能包含用户名或密码</string>
+    <string name="url_error_query">地址中不能包含“?”或“#”及其后面的内容</string>
+    <string name="url_error_port">端口号必须在 1–65535 之间</string>
+
+    <string name="test_ok">连接成功（HTTP %1$d），证书有效。</string>
+    <string name="test_ok_nextcloud">能连上，但这看起来是 Nextcloud 的地址，不是管理面板。管理面板默认端口是 9443，例如 https://192.168.1.10:9443。</string>
+    <string name="test_cert_untrusted">能连上服务器，但手机还不信任它的证书。IP 地址模式需要先在手机上安装 HomeVault 根证书，请点“证书安装说明”。</string>
+    <string name="test_cert_mismatch">证书与这个地址不匹配。请使用服务器安装完成时显示的地址（证书只对那些 IP / 域名有效）。</string>
+    <string name="test_host_unknown">找不到这个域名。请检查拼写；在外面使用时请先打开 VPN。</string>
+    <string name="test_timeout">连接超时。在家请确认手机连的是家里的 Wi-Fi；在外面请先打开 VPN。</string>
+    <string name="test_refused">无法连接：请确认地址和端口正确、服务器已开机且 HomeVault 正在运行；在外面请先打开 VPN。</string>
+    <string name="test_closed">服务器直接断开了连接。可能是手机的 IP 不在服务器允许的网段内（HV_ALLOWED_CIDRS），或者端口填错了。</string>
+    <string name="test_other">连接失败：%1$s</string>
+
+    <!-- 主界面菜单 -->
+    <string name="action_refresh">刷新</string>
+    <string name="action_files">文件</string>
+    <string name="action_vpn">VPN</string>
+    <string name="action_change_server">更换服务器</string>
+    <string name="action_about">关于</string>
+    <string name="action_retry">重试</string>
+    <string name="action_close">关闭</string>
+
+    <!-- 加载失败 -->
+    <string name="error_title">无法打开管理面板</string>
+    <string name="error_host_lookup">找不到服务器 %1$s。\n\n在外面使用时请先打开 VPN；也请检查地址是否填写正确。</string>
+    <string name="error_connect">连接不上 %1$s。\n\n• 在家：确认手机连的是家里的 Wi-Fi，并且服务器已开机。\n• 在外面：先打开 VPN（WG Tunnel 或 WireGuard），再点“重试”。</string>
+    <string name="error_ssl">服务器证书不受信任，已停止加载（为了安全，本应用不会忽略证书错误）。请按“证书安装说明”在手机上安装 HomeVault 根证书，然后点“重试”。</string>
+    <string name="error_http">管理面板暂时不可用（HTTP %1$d）。服务器可能正在启动或更新，请稍后重试；如果一直这样，请在服务器上运行 hv doctor 检查。</string>
+    <string name="error_generic">加载失败：%1$s\n\n在外面使用时请先打开 VPN。</string>
+    <string name="error_renderer_gone">网页组件意外退出，正在重新加载。</string>
+
+    <!-- 证书 -->
+    <string name="cert_title">无法验证服务器证书</string>
+    <string name="cert_reason_untrusted">证书不受信任（手机上还没有安装 HomeVault 根证书）</string>
+    <string name="cert_reason_mismatch">证书与访问的地址不匹配</string>
+    <string name="cert_reason_expired">证书已过期（也请检查手机的日期和时间）</string>
+    <string name="cert_reason_not_yet_valid">证书尚未生效（请检查手机的日期和时间）</string>
+    <string name="cert_reason_other">证书无效</string>
+    <string name="cert_reason_unknown">未能确认（请先测试连接）</string>
+    <string name="cert_issuer_unknown">未知</string>
+    <string name="cert_message">为了你的数据安全，本应用不会忽略证书错误。\n\n原因：%1$s\n证书颁发者：%2$s\n\n服务器使用 IP 地址（内部证书）模式时，需要在手机上安装一次 HomeVault 根证书：\n\n1. 点“下载根证书”，用浏览器下载 ca.crt（%3$s）。浏览器会提示“您的连接不是私密连接”，这是因为证书还没安装，点“高级”→“继续前往”即可。也可以在服务器上用 hv ca 命令导出证书文件，再通过数据线或聊天软件发到手机。\n\n2. 打开 设置 → 安全（或“安全与隐私”→“更多安全设置”）→ 加密与凭据 → 安装证书 → CA 证书 → 仍然安装，选择刚下载的 ca.crt。各品牌手机的菜单名称不同，可以在设置里搜索“证书”。\n\n3. 安装后可在“受信任的凭据 → 用户”里查看这个证书，SHA-256 指纹应与服务器上 hv ca 显示的一致。\n\n4. 回到本应用点“刷新”。装好后 Nextcloud 应用和手机浏览器也会信任这个证书。\n\n如果原因是“地址不匹配”，请改用服务器安装完成时显示的地址。</string>
+    <string name="cert_download">下载根证书</string>
+    <string name="cert_open_settings">打开安全设置</string>
+
+    <!-- VPN -->
+    <string name="vpn_missing_title">未找到 VPN 应用</string>
+    <string name="vpn_missing_message">在外面（不在家里 Wi-Fi 时）访问 HomeVault，需要先连上家里的 WireGuard VPN。\n\n推荐安装 WG Tunnel：可以按 Wi-Fi 自动开关 VPN，家里公网 IP 变化后也能自动跟随。可从 IzzyOnDroid、F-Droid 或 GitHub 下载。\n也可以使用官方 WireGuard 应用（家里 IP 变化后需要手动关闭再打开一次隧道）。\n\n安装后，在服务器上为这台手机添加 VPN 设备：\n• Linux 服务器：打开 wg-easy 管理页（https://服务器地址:8443）新建客户端；\n• Windows 服务器：“HomeVault 管理”菜单 → 6 添加手机VPN。\n然后在 VPN 应用里扫描二维码导入即可。</string>
+    <string name="vpn_download_wgtunnel">下载 WG Tunnel</string>
+    <string name="vpn_download_wireguard">下载 WireGuard</string>
+
+    <!-- Nextcloud -->
+    <string name="nc_missing_title">未安装 Nextcloud 应用</string>
+    <string name="nc_missing_message">手机照片和视频的自动备份请使用 Nextcloud 官方应用的“自动上传”功能。可从 F-Droid 或 GitHub 下载（部分手机应用市场搜不到）。\n\n现在也可以先在浏览器中打开 Nextcloud 网页版：\n%1$s</string>
+    <string name="nc_open_web">打开网页版</string>
+    <string name="nc_download">下载 Nextcloud 应用</string>
+
+    <!-- 关于 -->
+    <string name="about_title">关于 HomeVault</string>
+    <string name="about_message">HomeVault 家庭归档 · 安卓端\n版本 %1$s（%2$d）\n\n管理面板：%3$s\nNextcloud：%4$s\n\n本应用是 HomeVault 管理面板的安卓外壳：只连接你自己的服务器，不收集任何数据，不含广告和第三方组件，只申请“网络”权限。\n\n文件浏览和照片自动备份请使用 Nextcloud 应用；在外面使用前请先打开 VPN。\n\n开源许可：MIT</string>
+
+    <!-- 下载与链接 -->
+    <string name="download_started">开始下载：%1$s（完成后在通知栏或“下载”中查看）</string>
+    <string name="download_unsupported">无法下载：这不是普通的 https 下载链接</string>
+    <string name="download_failed">无法开始下载：%1$s</string>
+    <string name="no_app_for_link">手机上没有可以打开此链接的应用</string>
+    <string name="link_blocked">已阻止不支持的链接：%1$s</string>
+    <string name="file_chooser_failed">无法打开文件选择器</string>
+</resources>

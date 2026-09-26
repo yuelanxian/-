@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#1f6fe0">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="HomeVault 家庭归档服务器管理面板">
+<title>HomeVault 管理面板</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/app.css?v={{VERSION}}">
+<script src="/vendor/qrcode.js?v={{VERSION}}" defer></script>
+<script type="module" src="/js/app.js?v={{VERSION}}"></script>
+</head>
+<body>
+<div id="app" class="app">
+  <header class="topbar">
+    <div class="brand">
+      <img src="/icons/icon-192.png" alt="">
+      <div>
+        <h1 id="page-heading">HomeVault</h1>
+        <div class="sub" id="topbar-sub"></div>
+      </div>
+    </div>
+    <button type="button" class="icon-btn" id="btn-refresh" title="刷新" aria-label="刷新" hidden></button>
+    <button type="button" class="icon-btn" id="btn-logout" title="退出登录" aria-label="退出登录" hidden></button>
+  </header>
+  <nav class="tabs" id="tabs" aria-label="主导航" hidden></nav>
+  <main id="view">
+    <div class="loading"><div class="spinner"></div></div>
+    <noscript><p>管理面板需要启用 JavaScript。</p></noscript>
+  </main>
+</div>
+<div class="toast-host" id="toasts" aria-live="polite"></div>
+</body>
+</html>

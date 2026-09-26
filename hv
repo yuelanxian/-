@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# HomeVault Linux 管理工具 —— 用法：./hv help
+set -Eeuo pipefail
+shopt -s inherit_errexit 2>/dev/null || true
+
+HV_VERSION=0.1.0
+HV_SELF_PATH=$(readlink -f "${BASH_SOURCE[0]}")
+HV_ROOT=$(dirname "$HV_SELF_PATH")
+HV_SELF=./hv
+[[ $PWD == "$HV_ROOT" ]] || HV_SELF=$HV_SELF_PATH
+# UTF-8 locale for correct Chinese handling (only when available)
+if [[ -z ${HV_LOCALE:-} ]]; then
+	for _l in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do
+		if locale -a 2>/dev/null | grep -qx "$_l"; then
+			HV_LOCALE=$_l
+			break
+		fi
+	done
+fi
+[[ -n ${HV_LOCALE:-} ]] && export LC_ALL=$HV_LOCALE
+umask 022
+
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+	echo "需要 bash ≥ 4.4" >&2
+	exit 1
+fi
+
+# shellcheck source=scripts/lib.sh
+. "$HV_ROOT/scripts/lib.sh"
+# shellcheck source=scripts/env.sh
+. "$HV_ROOT/scripts/env.sh"
+# shellcheck source=scripts/compose.sh
+. "$HV_ROOT/scripts/compose.sh"
+# shellcheck source=scripts/storage.sh
+. "$HV_ROOT/scripts/storage.sh"
+# shellcheck source=scripts/backup.sh
+. "$HV_ROOT/scripts/backup.sh"
+# shellcheck source=scripts/restore.sh
+. "$HV_ROOT/scripts/restore.sh"
+# shellcheck source=scripts/firewall.sh
+. "$HV_ROOT/scripts/firewall.sh"
+# shellcheck source=scripts/vpn.sh
+. "$HV_ROOT/scripts/vpn.sh"
+# shellcheck source=scripts/ddns.sh
+. "$HV_ROOT/scripts/ddns.sh"
+# shellcheck source=scripts/users.sh
+. "$HV_ROOT/scripts/users.sh"
+# shellcheck source=scripts/logs.sh
+. "$HV_ROOT/scripts/logs.sh"
+# shellcheck source=scripts/doctor.sh
+. "$HV_ROOT/scripts/doctor.sh"
+# shellcheck source=scripts/install.sh
+. "$HV_ROOT/scripts/install.sh"
+# shellcheck source=scripts/help.sh
+. "$HV_ROOT/scripts/help.sh"
+
+hv_version() { printf '%s\n' "$HV_VERSION"; }
+
+trap 'hv_run_cleanup' EXIT
+trap 'exit 130' INT TERM
+
+main() {
+	local cmd=${1:-help} a
+	local -a logged=()
+	(($#)) && shift
+	HV_CMD=$cmd
+	# global flags usable anywhere
+	local -a rest=()
+	case $cmd in
+	occ | compose | logs) ;; # pass-through commands: keep every argument
+	*)
+		for a in "$@"; do
+			case $a in
+			--yes | -y) HV_YES=1 ;;
+			--non-interactive) HV_NONINTERACTIVE=1 ;;
+			--quiet | -q) HV_QUIET=1 ;;
+			*) rest+=("$a") ;;
+			esac
+		done
+		[[ $cmd == install ]] && rest=("$@") # install parses these itself
+		set -- "${rest[@]+"${rest[@]}"}"
+		;;
+	esac
+
+	if [[ -f $HV_ENV_FILE ]]; then
+		env_load
+	fi
+	env_defaults
+	HV_STATE_DIR=$HV_ROOT/state
+
+	# log the command line (values after secret-like flags are masked)
+	local prev=''
+	for a in "$@"; do
+		if [[ ${prev,,} == --*secret* || ${prev,,} == --*password* || ${prev,,} == --*token* ]]; then
+			logged+=('***')
+		elif [[ $a == *=* && ${a%%=*} =~ [Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Kk][Ee][Yy] ]]; then
+			logged+=("${a%%=*}=***")
+		else
+			logged+=("$a")
+		fi
+		prev=$a
+	done
+	hv_log "CMD $cmd ${logged[*]}"
+
+	case $cmd in
+	help | -h | --help) help_main "$@" ;;
+	version | --version) hv_version ;;
+	install) cmd_install "$@" ;;
+	up | start) cmd_up "$@" ;;
+	down | stop) cmd_down "$@" ;;
+	restart) cmd_restart "$@" ;;
+	status | ps) cmd_status "$@" ;;
+	logs) cmd_logs "$@" ;;
+	pull) cmd_pull "$@" ;;
+	compose) cmd_compose "$@" ;;
+	occ) cmd_occ "$@" ;;
+	harden) cmd_harden "$@" ;;
+	user | users) cmd_user "$@" ;;
+	ca) cmd_ca "$@" ;;
+	storage) cmd_storage "$@" ;;
+	vpn) cmd_vpn "$@" ;;
+	ddns) cmd_ddns "$@" ;;
+	backup) cmd_backup "$@" ;;
+	restore) cmd_restore "$@" ;;
+	schedule-backup) cmd_schedule_backup "$@" ;;
+	update | upgrade) cmd_update "$@" ;;
+	firewall) cmd_firewall "$@" ;;
+	doctor | check) cmd_doctor "$@" ;;
+	maintenance) cmd_maintenance "$@" ;;
+	status-update) cmd_status_update "$@" ;;
+	requests) cmd_requests "$@" ;;
+	android) cmd_android "$@" ;;
+	*)
+		err "未知命令：$cmd"
+		help_main
+		exit 2
+		;;
+	esac
+}
+
+main "$@"

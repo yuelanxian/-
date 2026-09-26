@@ -1,0 +1,21 @@
+# Minimal stand-in for compose.yaml used by unit tests (services the generators reference)
+services:
+  app:
+    image: busybox
+  cron:
+    image: busybox
+  backup:
+    image: busybox
+    volumes:
+      - ${HV_VOL_HTML:-nc_html}:/src/nextcloud-html:ro
+      - ${HV_NC_DATA_PATH}:/src/nextcloud-data:ro
+      - ${HV_VOL_CADDY_DATA:-caddy_data}:/src/caddy-data:ro
+      - ${HV_DUMP_DIR}:/src/dumps:ro
+      - ${HV_VOL_WGEASY:-wg_easy}:/src/wg-easy:ro
+      - ./:/src/project:ro
+  panel:
+    image: busybox
+volumes:
+  nc_html:
+  caddy_data:
+  wg_easy:

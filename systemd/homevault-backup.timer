@@ -1,0 +1,11 @@
+# HomeVault 每日备份定时器（时间来自 .env 的 HV_BACKUP_TIME；错过时开机后补做）
+[Unit]
+Description=HomeVault 每日备份定时器
+
+[Timer]
+OnCalendar=*-*-* @HV_BACKUP_TIME@:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

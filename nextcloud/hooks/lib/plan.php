@@ -22,7 +22,11 @@ if ($argc < 3) {
 	exit(2);
 }
 
-$current = json_decode((string)file_get_contents($argv[1]), true);
+// occ may print notices before/after the JSON document: keep only the outermost {...}
+$raw = (string)file_get_contents($argv[1]);
+$start = strpos($raw, '{');
+$end = strrpos($raw, '}');
+$current = ($start === false || $end === false) ? null : json_decode(substr($raw, $start, $end - $start + 1), true);
 if (!is_array($current) || !isset($current['system']) || !is_array($current['system'])) {
 	fwrite(STDERR, "config:list output is not valid JSON\n");
 	exit(2);

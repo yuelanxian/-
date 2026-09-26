@@ -1,0 +1,43 @@
+# 统一换行符：容器内执行的脚本与配置必须是 LF（Windows 的 core.autocrlf 会破坏它们）
+* text=auto
+
+*.sh           text eol=lf
+hv             text eol=lf
+Caddyfile      text eol=lf
+*.caddy        text eol=lf
+Dockerfile     text eol=lf
+*.php          text eol=lf
+*.yaml         text eol=lf
+*.yml          text eol=lf
+.env.example   text eol=lf
+*.conf         text eol=lf
+*.service      text eol=lf
+*.timer        text eol=lf
+*.html         text eol=lf
+*.js           text eol=lf
+*.json         text eol=lf
+*.md           text eol=lf
+*.txt          text eol=lf
+*.css          text eol=lf
+*.svg          text eol=lf
+*.go           text eol=lf
+go.mod         text eol=lf
+go.sum         text eol=lf
+*.tmpl         text eol=lf
+LICENSE        text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+.editorconfig  text eol=lf
+
+# PowerShell：CRLF（且含中文的 .ps1 必须是带 BOM 的 UTF-8）
+*.ps1          text eol=crlf
+*.psm1         text eol=crlf
+*.psd1         text eol=crlf
+*.cmd          text eol=crlf
+*.bat          text eol=crlf
+
+# 二进制
+*.png          binary
+*.jpg          binary
+*.ico          binary
+*.pdf          binary

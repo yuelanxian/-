@@ -1,0 +1,353 @@
+# HomeVault — 全部服务（可选服务用 profiles：vpn / ddns / monitor / tools）。
+# 所有值来自 .env（由 ./hv 或 windows\hv.ps1 生成）；请勿直接修改本文件。
+# 标准调用：docker compose -f compose.yaml [-f compose.acme.yaml] [-f compose.storage.yaml] --env-file .env [--profile …] <命令>
+name: homevault
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+# app 与 cron 必须完全一致（镜像、环境变量、密钥、卷），否则 cron 会用错 Redis/锁/数据目录。
+x-nextcloud: &nextcloud
+  image: ${NEXTCLOUD_IMAGE:-docker.io/library/nextcloud:34-apache}
+  restart: unless-stopped
+  logging: *logging
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    POSTGRES_HOST: db
+    POSTGRES_DB: nextcloud
+    POSTGRES_USER: nextcloud
+    POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    NEXTCLOUD_ADMIN_USER: ${HV_ADMIN_USER:-hvadmin}
+    NEXTCLOUD_ADMIN_PASSWORD_FILE: /run/secrets/nextcloud_admin_password
+    NEXTCLOUD_DATA_DIR: /var/www/data
+    NEXTCLOUD_TRUSTED_DOMAINS: ${HV_TRUSTED_DOMAINS:-}
+    REDIS_HOST: redis
+    REDIS_HOST_PASSWORD_FILE: /run/secrets/redis_password
+    # 任何值都会关闭 Apache remoteip（防止伪造 X-Real-IP）；真实客户端 IP 由 TRUSTED_PROXIES + X-Forwarded-For 提供
+    APACHE_DISABLE_REWRITE_IP: "1"
+    TRUSTED_PROXIES: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+    OVERWRITEPROTOCOL: https
+    OVERWRITECLIURL: ${HV_OVERWRITE_CLI_URL:-}
+    PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-1G}
+    PHP_UPLOAD_LIMIT: ${PHP_UPLOAD_LIMIT:-16G}
+    # 0 = 不限制请求体（非分块客户端也能单次 PUT 多 GB 文件）
+    APACHE_BODY_LIMIT: "0"
+    TZ: ${HV_TZ:-Asia/Shanghai}
+    # 供 nextcloud/hooks 使用
+    HV_PLATFORM: ${HV_PLATFORM:-linux}
+    HV_TRUSTED_DOMAINS: ${HV_TRUSTED_DOMAINS:-}
+    HV_OVERWRITE_CLI_URL: ${HV_OVERWRITE_CLI_URL:-}
+    HV_ALLOW_PUBLIC_LINKS: ${HV_ALLOW_PUBLIC_LINKS:-false}
+    HV_PASSWORD_MIN_LENGTH: ${HV_PASSWORD_MIN_LENGTH:-12}
+    HV_DEFAULT_LANGUAGE: ${HV_DEFAULT_LANGUAGE:-zh_CN}
+    HV_TZ: ${HV_TZ:-Asia/Shanghai}
+    HV_MAINTENANCE_WINDOW_UTC: ${HV_MAINTENANCE_WINDOW_UTC:-18}
+    HV_FRONTEND_SUBNET: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+    HV_REPAIR_EXPENSIVE: ${HV_REPAIR_EXPENSIVE:-false}
+  secrets:
+    - postgres_password
+    - redis_password
+    - nextcloud_admin_password
+  volumes:
+    - ${HV_VOL_HTML:-nc_html}:/var/www/html
+    - ${HV_NC_DATA_PATH:?HV_NC_DATA_PATH 未设置（Nextcloud 数据目录），请先运行 hv install}:/var/www/data
+    - ./nextcloud/hooks/pre-installation:/docker-entrypoint-hooks.d/pre-installation:ro
+    - ./nextcloud/hooks/post-installation:/docker-entrypoint-hooks.d/post-installation:ro
+    - ./nextcloud/hooks/before-starting:/docker-entrypoint-hooks.d/before-starting:ro
+    - ./nextcloud/hooks/post-upgrade:/docker-entrypoint-hooks.d/post-upgrade:ro
+    - ./nextcloud/hooks/lib:/opt/homevault/hooks-lib:ro
+
+services:
+  app:
+    <<: *nextcloud
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 10 http://localhost/status.php | grep -q '\"installed\":true'"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      # 首次安装 / 大版本升级可能较慢
+      start_period: 15m
+      start_interval: 5s
+
+  cron:
+    <<: *nextcloud
+    entrypoint: /cron.sh
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "tr '\\0' ' ' </proc/1/cmdline | grep -q crond"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+
+  db:
+    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:18-alpine}
+    restart: unless-stopped
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    secrets:
+      - postgres_password
+    volumes:
+      # PostgreSQL 18+：挂载 /var/lib/postgresql（不是 …/data）
+      - ${HV_VOL_DB:-pg_data}:/var/lib/postgresql
+    networks:
+      - backend
+    healthcheck:
+      # 走 TCP：初始化阶段的临时实例只监听 unix socket，避免过早判定为健康
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U nextcloud -d nextcloud"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 2m
+      start_interval: 2s
+
+  redis:
+    image: ${REDIS_IMAGE:-docker.io/library/redis:8-alpine}
+    restart: unless-stopped
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    # 密码写入容器内 0600 配置文件，不出现在 redis-server 的命令行参数中
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        umask 077
+        mkdir -p /tmp/homevault-redis
+        printf 'requirepass "%s"\n' "$$(cat /run/secrets/redis_password)" > /tmp/homevault-redis/redis.conf
+        exec docker-entrypoint.sh redis-server /tmp/homevault-redis/redis.conf
+    environment:
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    secrets:
+      - redis_password
+    volumes:
+      - ${HV_VOL_REDIS:-redis_data}:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 1m
+      start_interval: 2s
+
+  caddy:
+    image: ${CADDY_IMAGE:-docker.io/library/caddy:2.11.4-alpine}
+    restart: unless-stopped
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    # 只发布 TCP，且显式绑定 IPv4 地址（裸 443:443 会同时监听 [::]）
+    ports:
+      - "${HV_BIND_IP:?HV_BIND_IP 未设置，请先运行 hv install}:${HV_HTTP_PORT:-80}:${HV_HTTP_PORT:-80}/tcp"
+      - "${HV_BIND_IP:?HV_BIND_IP 未设置，请先运行 hv install}:${HV_HTTPS_PORT:-443}:${HV_HTTPS_PORT:-443}/tcp"
+      - "${HV_BIND_IP:?HV_BIND_IP 未设置，请先运行 hv install}:${HV_ADMIN_PORT:-8443}:${HV_ADMIN_PORT:-8443}/tcp"
+    environment:
+      HV_HOST: ${HV_HOST:?HV_HOST 未设置，请先运行 hv install}
+      HV_SITE_ADDRESSES: ${HV_SITE_ADDRESSES:?HV_SITE_ADDRESSES 未设置，请运行 hv up 重新生成}
+      HV_ALLOWED_CIDRS: ${HV_ALLOWED_CIDRS:-private_ranges 100.64.0.0/10}
+      HV_HTTP_PORT: ${HV_HTTP_PORT:-80}
+      HV_HTTPS_PORT: ${HV_HTTPS_PORT:-443}
+      HV_ADMIN_PORT: ${HV_ADMIN_PORT:-8443}
+      HV_TLS_SNIPPET: ${HV_TLS_SNIPPET:-internal}
+      HV_ADMIN_SNIPPET: ${HV_ADMIN_SNIPPET:-none}
+      HV_ACME_EMAIL: ${HV_ACME_EMAIL:-}
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    # DNS 服务商凭据（仅域名模式）：ALIYUN_* / TENCENTCLOUD_* / CF_API_TOKEN
+    env_file:
+      - path: ./secrets/caddy-dns.env
+        required: false
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - ${HV_VOL_CADDY_DATA:-caddy_data}:/data
+      - ${HV_VOL_CADDY_CONFIG:-caddy_config}:/config
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z -w 3 127.0.0.1 \"$$HV_HTTPS_PORT\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+      start_interval: 2s
+
+  # ---------------------------------------------------------------- 可选：VPN（仅 Linux）
+  wg-easy:
+    profiles: ["vpn"]
+    image: ${WG_EASY_IMAGE:-ghcr.io/wg-easy/wg-easy:15}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DISABLE_VERSION_CHECK: "true"
+      DISABLE_IPV6: "true"
+      PORT: "51821"
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    # 首次启动的无人值守初始化参数（INIT_*），成功后由 hv vpn finalize 删除
+    env_file:
+      - path: ./secrets/wg-easy-init.env
+        required: false
+    volumes:
+      - ${HV_VOL_WGEASY:-wg_easy}:/etc/wireguard
+      - /lib/modules:/lib/modules:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    # 路由器只转发这个 UDP 端口；管理界面 51821 不发布，只经 Caddy 访问
+    ports:
+      - "0.0.0.0:${WG_PORT:-51820}:${WG_PORT:-51820}/udp"
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    # 只接入一个网络，保证 eth0 稳定（MASQUERADE 依赖它）
+    networks:
+      - frontend
+
+  # ---------------------------------------------------------------- 可选：动态域名
+  ddns-go:
+    profiles: ["ddns"]
+    image: ${DDNS_GO_IMAGE:-docker.io/jeessy/ddns-go:v6.17.7}
+    restart: unless-stopped
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    # -noweb：不开网页（无 30 分钟"首位访问者设密码"窗口）；配置由 hv ddns setup 生成
+    command: ["-noweb", "-f", "300", "-c", "/config/ddns-go.yaml"]
+    environment:
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    volumes:
+      - type: bind
+        source: ./secrets/ddns-go.yaml
+        target: /config/ddns-go.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - frontend
+
+  # ---------------------------------------------------------------- 可选：硬盘健康监控（仅 Linux）
+  # 需要监控的硬盘设备（HV_SCRUTINY_DEVICES）由 hv 写入叠加文件的 services.scrutiny.devices。
+  scrutiny:
+    profiles: ["monitor"]
+    image: ${SCRUTINY_IMAGE:-ghcr.io/analogj/scrutiny:v0.9.4-omnibus}
+    restart: unless-stopped
+    logging: *logging
+    cap_add:
+      - SYS_RAWIO
+      - SYS_ADMIN
+    environment:
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    volumes:
+      - /run/udev:/run/udev:ro
+      - scrutiny_config:/opt/scrutiny/config
+      - scrutiny_influxdb:/opt/scrutiny/influxdb
+    # 无身份验证：只绑定本机回环地址（8086 InfluxDB 永不发布）
+    ports:
+      - "127.0.0.1:${HV_SCRUTINY_PORT:-8080}:8080/tcp"
+    networks:
+      - frontend
+
+  # ---------------------------------------------------------------- 工具：restic 备份（docker compose run --rm backup …）
+  backup:
+    profiles: ["tools"]
+    image: ${RESTIC_IMAGE:-docker.io/restic/restic:0.19.1}
+    hostname: homevault
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+      RESTIC_CACHE_DIR: /cache
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    # S3/OSS/COS 凭据：AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+    env_file:
+      - path: ./secrets/backup.env
+        required: false
+    secrets:
+      - restic_password
+    volumes:
+      - restic_cache:/cache
+      - ${HV_VOL_HTML:-nc_html}:/src/nextcloud-html:ro
+      - ${HV_NC_DATA_PATH:?HV_NC_DATA_PATH 未设置（Nextcloud 数据目录），请先运行 hv install}:/src/nextcloud-data:ro
+      - ${HV_VOL_CADDY_DATA:-caddy_data}:/src/caddy-data:ro
+      - ${HV_VOL_WGEASY:-wg_easy}:/src/wg-easy:ro
+      - ${HV_DUMP_DIR:-hv_dumps}:/src/dumps:ro
+      - .:/src/project:ro
+      # 未设置时挂载空卷，仅为占位
+      - ${HV_WIN_WG_DIR:-hv_empty}:/src/windows-wireguard:ro
+      # 本地仓库（HV_BACKUP_TARGET=local）；未设置时为占位卷
+      - ${HV_BACKUP_LOCAL_PATH:-hv_repo_unset}:/repo
+    networks:
+      - frontend
+
+networks:
+  frontend:
+    driver: bridge
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+  backend:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  redis_password:
+    file: ./secrets/redis_password
+  nextcloud_admin_password:
+    file: ./secrets/nextcloud_admin_password
+  restic_password:
+    file: ./secrets/restic_password
+
+# ${HV_VOL_*} 为空时使用下列命名卷；设置为宿主机路径时改为绑定挂载（这些卷随之不再使用）
+volumes:
+  nc_html:
+  pg_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+  wg_easy:
+  restic_cache:
+  scrutiny_config:
+  scrutiny_influxdb:
+  hv_dumps:
+  hv_empty:
+  hv_repo_unset:

@@ -1,4 +1,4 @@
-# HomeVault Windows CLI - common helpers (output, argument parsing, prompts, files, processes).
+﻿# HomeVault Windows CLI - common helpers (output, argument parsing, prompts, files, processes).
 # Compatible with Windows PowerShell 5.1 and PowerShell 7. Pure helpers here are unit-tested.
 
 $script:HvVersion = '1.0.0'
@@ -437,8 +437,21 @@ function ConvertTo-HvCommandLine {
     return ($parts -join ' ')
 }
 
+function Invoke-HvDirectProcess {
+    # Child inherits this console (real TTY, colours, Ctrl+C) - output is NOT captured by the PowerShell pipeline.
+    param([string]$Exe, [string[]]$ArgumentList = @())
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = ConvertTo-HvCommandLine $ArgumentList
+    $psi.UseShellExecute = $false
+    if ($script:HvRoot) { $psi.WorkingDirectory = $script:HvRoot } else { $psi.WorkingDirectory = (Get-Location).ProviderPath }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.WaitForExit()
+    return $p.ExitCode
+}
+
 function Invoke-HvNative {
-    # Run a native program. Default: output goes straight to the console.
+    # Run a native program. Default: output goes straight to the console (direct child process).
     # -Capture: return stdout lines (stderr kept separately). -Tee: stream through the host (and the log file).
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -449,7 +462,8 @@ function Invoke-HvNative {
         [switch]$AllowFailure,
         [AllowNull()][string]$InputText = $null
     )
-    if (-not (Get-Command $FilePath -ErrorAction SilentlyContinue)) {
+    $cmd = Get-Command $FilePath -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cmd) {
         Stop-Hv ('找不到程序：' + $FilePath) 127
     }
     $legacy = Test-HvLegacyArgPassing
@@ -462,7 +476,10 @@ function Invoke-HvNative {
     $code = 0
     try {
         $global:LASTEXITCODE = 0
-        if ($Tee) {
+        if (-not ($Capture -or $Quiet -or $Tee) -and $null -eq $InputText -and $cmd.CommandType -eq 'Application') {
+            $code = Invoke-HvDirectProcess -Exe $cmd.Path -ArgumentList $ArgumentList
+            $global:LASTEXITCODE = $code
+        } elseif ($Tee) {
             if ($null -ne $InputText) {
                 $InputText | & $FilePath @argv 2>&1 | ForEach-Object {
                     $line = $_
@@ -483,7 +500,7 @@ function Invoke-HvNative {
                 if ($it -is [System.Management.Automation.ErrorRecord]) { $stderr.Add([string]$it.Exception.Message) } else { $stdout.Add([string]$it) }
             }
         } else {
-            if ($null -ne $InputText) { $InputText | & $FilePath @argv } else { & $FilePath @argv }
+            if ($null -ne $InputText) { $InputText | & $FilePath @argv 2>&1 | Out-Host } else { & $FilePath @argv 2>&1 | Out-Host }
         }
         $code = $LASTEXITCODE
         if ($null -eq $code) { $code = 0 }

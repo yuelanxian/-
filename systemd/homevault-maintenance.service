@@ -1,0 +1,10 @@
+# HomeVault 每日维护：导出容器日志、轮转 Nextcloud 日志、按保留天数清理日志、写入状态文件
+[Unit]
+Description=HomeVault 每日维护（日志）
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@HV_ROOT@/hv maintenance
+Nice=10

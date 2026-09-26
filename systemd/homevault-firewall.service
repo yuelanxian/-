@@ -1,0 +1,16 @@
+# HomeVault 主机防火墙：Docker 启动后在 DOCKER-USER 链前插入 HOMEVAULT 链（由 hv firewall --apply 安装）
+[Unit]
+Description=HomeVault 防火墙规则（DOCKER-USER → HOMEVAULT）
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HV_FW_FROM_SYSTEMD=1
+ExecStart=@HV_ROOT@/hv firewall --apply --no-ufw
+ExecStop=@HV_ROOT@/hv firewall --remove
+
+[Install]
+WantedBy=multi-user.target docker.service

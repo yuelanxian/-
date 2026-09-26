@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:tint="?android:attr/colorControlNormal"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Shield with a keyhole cut out. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,2 L20,5.5 L20,11 C20,16 16.6,20.3 12,22 C7.4,20.3 4,16 4,11 L4,5.5 Z M12,7 A2.5,2.5 0 0,0 10.8,11.7 L10.3,16 L13.7,16 L13.2,11.7 A2.5,2.5 0 0,0 12,7 Z" />
+</vector>

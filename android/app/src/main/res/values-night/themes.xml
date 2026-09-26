@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.HomeVault" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">@color/hv_toolbar</item>
+        <item name="android:colorPrimaryDark">@color/hv_status_bar</item>
+        <item name="android:colorAccent">@color/hv_accent</item>
+        <item name="android:statusBarColor">@color/hv_status_bar</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">@color/hv_background</item>
+    </style>
+
+    <style name="ThemeOverlay.HomeVault.Popup" parent="android:ThemeOverlay.Material" />
+</resources>

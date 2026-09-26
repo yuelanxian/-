@@ -1,0 +1,20 @@
+# HomeVault 运行时生成的文件（含机密或本机数据），切勿提交
+/.env
+/.env.*
+!/.env.example
+/secrets/
+/storage.conf
+/compose.storage.yaml
+/state/
+/clients/
+/data/
+/restore/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/

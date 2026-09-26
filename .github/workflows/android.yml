@@ -1,0 +1,148 @@
+# HomeVault 安卓端：构建 APK（debug + release）、lint、单元测试；打 v* 标签时附加到 GitHub Release。
+#
+# 可选的仓库 Secrets（Settings → Secrets and variables → Actions），用于正式签名 release 版：
+#   HV_ANDROID_KEYSTORE_B64      keystore 文件的 base64（base64 -w0 homevault-release.jks）
+#   HV_ANDROID_KEYSTORE_PASSWORD keystore 密码
+#   HV_ANDROID_KEY_ALIAS         密钥别名
+#   HV_ANDROID_KEY_PASSWORD      密钥密码
+# 未配置时 release 版用本次构建临时生成的 debug 密钥签名：能安装，但每次构建密钥都不同，
+# 以后无法直接覆盖升级（需先卸载）。详见 android/README.md。
+name: Android
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Version (from tag vX.Y.Z, otherwise defaults from build.gradle.kts)
+        id: version
+        shell: bash
+        run: |
+          args=""
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF_NAME#v}"
+            if [[ ! "$ver" =~ ^([0-9]{1,4})\.([0-9]{1,2})\.([0-9]{1,2})$ ]]; then
+              echo "::error::标签必须形如 v1.2.3（次版本号和修订号 ≤ 99），实际为 ${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            code=$(( 10#${BASH_REMATCH[1]} * 10000 + 10#${BASH_REMATCH[2]} * 100 + 10#${BASH_REMATCH[3]} ))
+            (( code >= 1 )) || code=1
+            args="-PhvVersionName=${ver} -PhvVersionCode=${code}"
+            echo "版本 ${ver}（versionCode ${code}）"
+          fi
+          echo "args=${args}" >> "$GITHUB_OUTPUT"
+
+      - name: Debug APK, lint, unit tests
+        run: ./gradlew --no-daemon ${{ steps.version.outputs.args }} assembleDebug lintDebug testDebugUnitTest
+
+      - name: Decode release keystore (if configured)
+        id: keystore
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.HV_ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/homevault-release.jks"
+            echo "file=$RUNNER_TEMP/homevault-release.jks" >> "$GITHUB_OUTPUT"
+            echo "release 版使用仓库 Secrets 中的正式密钥签名"
+          else
+            echo "::warning title=未配置签名密钥::release 版使用临时 debug 密钥签名；以后的版本无法覆盖升级。请配置 HV_ANDROID_KEYSTORE_B64 等 Secrets。"
+          fi
+
+      - name: Release APK (R8)
+        env:
+          HV_ANDROID_KEYSTORE_FILE: ${{ steps.keystore.outputs.file }}
+          HV_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.HV_ANDROID_KEYSTORE_PASSWORD }}
+          HV_ANDROID_KEY_ALIAS: ${{ secrets.HV_ANDROID_KEY_ALIAS }}
+          HV_ANDROID_KEY_PASSWORD: ${{ secrets.HV_ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon ${{ steps.version.outputs.args }} assembleRelease
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/homevault-release.jks"
+
+      - name: Collect APKs
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk dist/homevault-android.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/homevault-android-debug.apk
+          (cd dist && sha256sum homevault-android.apk > homevault-android.apk.sha256 && sha256sum ./*.apk)
+          apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)/apksigner"
+          "$apksigner" verify --print-certs dist/homevault-android.apk | grep -E 'Signer #1 certificate (DN|SHA-256)'
+          ls -l dist
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v6
+        with:
+          name: homevault-android
+          path: |
+            android/dist/homevault-android.apk
+            android/dist/homevault-android.apk.sha256
+            android/dist/homevault-android-debug.apk
+          if-no-files-found: error
+
+      - name: Upload lint / test reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: homevault-android-reports
+          path: |
+            android/app/build/reports/
+          if-no-files-found: ignore
+
+  release:
+    name: Attach APK to GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: homevault-android
+          path: dist
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/homevault-android.apk
+            dist/homevault-android.apk.sha256
+          fail_on_unmatched_files: true

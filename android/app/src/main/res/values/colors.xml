@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="hv_toolbar">#0F5B66</color>
+    <color name="hv_status_bar">#0A4249</color>
+    <color name="hv_accent">#0F5B66</color>
+    <color name="hv_progress">#F2A93B</color>
+    <color name="hv_background">#F5F7F8</color>
+    <color name="hv_on_toolbar">#FFFFFF</color>
+    <color name="hv_on_toolbar_secondary">#CCFFFFFF</color>
+    <color name="hv_text_secondary">#5A6A70</color>
+    <color name="ic_launcher_background">#0F5B66</color>
+</resources>

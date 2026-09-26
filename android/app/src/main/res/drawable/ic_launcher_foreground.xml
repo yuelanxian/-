@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground (108dp canvas, artwork inside the 66dp safe zone):
+     a house whose door is a vault wheel. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,28 L80,51 L74,51 L74,80 L34,80 L34,51 L28,51 Z M54,53.5 A10.5,10.5 0 1,0 54,74.5 A10.5,10.5 0 1,0 54,53.5 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,60.5 A3.5,3.5 0 1,0 54,67.5 A3.5,3.5 0 1,0 54,60.5 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M53,56 L55,56 L55,72 L53,72 Z M46,63 L62,63 L62,65 L46,65 Z" />
+    <path
+        android:fillColor="#FFF2A93B"
+        android:pathData="M39,31 L44,31 L44,36.85 L39,41.27 Z" />
+</vector>

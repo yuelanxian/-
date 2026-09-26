@@ -6,7 +6,8 @@
 	persist_config off
 	skip_install_trust
 	http_port {$HV_HTTP_PORT}
-	https_port {$HV_HTTPS_PORT}
+	# 故意不设置 https_port：站点地址已带端口；若 https_port 等于站点端口，
+	# Caddy 的 HTTP→HTTPS 跳转会省略端口（HV_HTTPS_PORT≠443 时跳转到错误地址）。
 	servers {
 		# 仅 TCP：不启用 HTTP/3（不发布 UDP 端口）
 		protocols h1 h2

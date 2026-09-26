@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- targetSdk 36 is pinned on purpose (available on the CI images); raise it deliberately after testing. -->
+    <issue id="OldTargetApi" severity="informational" />
+</lint>

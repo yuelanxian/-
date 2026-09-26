@@ -1,0 +1,11 @@
+# 为管理面板写入 state/status.json、state/vpn-status.json，并处理面板提交的请求
+[Unit]
+Description=HomeVault 状态文件更新
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=-@HV_ROOT@/hv status-update
+ExecStart=@HV_ROOT@/hv requests process
+Nice=10

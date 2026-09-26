@@ -5,7 +5,7 @@ cert_issuer acme {
 	disable_http_challenge
 	disable_tlsalpn_challenge
 	dns cloudflare {env.CF_API_TOKEN}
-	resolvers 1.1.1.1 223.5.5.5
+	resolvers 223.5.5.5 119.29.29.29
 	propagation_delay 30s
 	propagation_timeout 10m
 }

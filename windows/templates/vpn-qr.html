@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:">
+<title>HomeVault VPN 配置 - {{HV_PEER_NAME}}</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #5b6475; --line: #dde1e8; --accent: #1f6feb; --warn-bg: #fff4e5; --warn-text: #8a4b00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --card: #1a1f26; --text: #e6e9ef; --muted: #a2abba; --line: #2c333d; --accent: #58a6ff; --warn-bg: #3a2a12; --warn-text: #ffcf8a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 16px; }
+  .warn { background: var(--warn-bg); color: var(--warn-text); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 680px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  #qr { background: #ffffff; border-radius: 8px; padding: 8px; }
+  #qr svg, #qr img { display: block; width: 100%; height: auto; }
+  dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; font-family: Consolas, "Cascadia Mono", monospace; }
+  ol { padding-left: 20px; margin: 8px 0 0; }
+  li { margin: 4px 0; }
+  h2 { font-size: 16px; margin: 0 0 6px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  button, a.btn { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; text-decoration: none; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 13px/1.5 Consolas, "Cascadia Mono", monospace; }
+  .hidden { display: none; }
+  .err { color: #d1242f; }
+</style>
+</head>
+<body>
+<main>
+  <h1>HomeVault VPN：{{HV_PEER_NAME}}</h1>
+  <p class="sub">生成时间 {{HV_GENERATED_AT}} · 服务器 {{HV_ENDPOINT}}</p>
+  <div class="warn">此页面包含该设备的 VPN 私钥，只在本机离线生成，不会上传到任何地方。扫码导入后请关闭页面，并回到 PowerShell 窗口按回车删除此文件。</div>
+  <div class="grid">
+    <div class="card">
+      <div id="qr" aria-label="WireGuard 配置二维码"></div>
+      <p id="qr-error" class="err hidden">二维码生成失败，请改用“下载 .conf 文件”导入。</p>
+    </div>
+    <div class="card">
+      <h2>手机导入步骤</h2>
+      <ol>
+        <li>安装 <b>WG Tunnel</b>（推荐：可按 Wi-Fi 自动开关、公网 IP 变化后自动重连）或官方 <b>WireGuard</b> App。</li>
+        <li>点右下角 <b>+</b> → <b>扫描二维码</b>，对准左侧二维码。</li>
+        <li>隧道名称填 <b>{{HV_PEER_NAME}}</b>，保存后打开开关。</li>
+        <li>WG Tunnel 可设置：连上家里 Wi-Fi 时自动关闭 VPN，离开家时自动开启。</li>
+        <li>在 Nextcloud App 中始终使用同一个服务器地址，无需修改。</li>
+      </ol>
+      <h2 style="margin-top:14px">隧道信息</h2>
+      <dl>
+        <dt>VPN 地址</dt><dd>{{HV_ADDRESS}}</dd>
+        <dt>服务器</dt><dd>{{HV_ENDPOINT}}</dd>
+      </dl>
+      <div class="actions">
+        <button type="button" id="toggle">显示配置文本</button>
+        <button type="button" id="download" class="primary">下载 .conf 文件</button>
+      </div>
+      <pre id="conf" class="hidden"></pre>
+    </div>
+  </div>
+</main>
+<script>
+{{HV_QRCODE_JS}}
+</script>
+<script>
+(function () {
+  var config = {{HV_CONFIG_JSON}};
+  var filename = {{HV_FILENAME_JSON}};
+  var box = document.getElementById('qr');
+  try {
+    qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+    var qr = qrcode(0, 'M');
+    qr.addData(config, 'Byte');
+    qr.make();
+    box.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true });
+  } catch (e) {
+    document.getElementById('qr-error').className = 'err';
+  }
+  var pre = document.getElementById('conf');
+  pre.textContent = config;
+  document.getElementById('toggle').onclick = function () {
+    var hidden = pre.className === 'hidden';
+    pre.className = hidden ? '' : 'hidden';
+    this.textContent = hidden ? '隐藏配置文本' : '显示配置文本';
+  };
+  document.getElementById('download').onclick = function () {
+    var blob = new Blob([config], { type: 'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  };
+})();
+</script>
+</body>
+</html>

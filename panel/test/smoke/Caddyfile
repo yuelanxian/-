@@ -1,0 +1,24 @@
+# Smoke test only: Nextcloud on :38443, panel on :38444 (same IP guard as the real Caddyfile)
+{
+	admin off
+	skip_install_trust
+	local_certs
+	default_sni 127.0.0.1
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://127.0.0.1:38443 {
+	reverse_proxy app:80
+}
+
+https://127.0.0.1:38444 {
+	route {
+		@outside not remote_ip private_ranges 100.64.0.0/10
+		abort @outside
+		header Strict-Transport-Security "max-age=15552000"
+		header -Server
+		reverse_proxy panel:8080
+	}
+}

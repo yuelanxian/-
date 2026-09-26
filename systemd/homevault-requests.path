@@ -1,0 +1,11 @@
+# 管理面板写入 state/requests/*.json 时触发（仅执行允许列表中的请求类型）
+[Unit]
+Description=HomeVault 面板请求监视
+
+[Path]
+PathChanged=@HV_ROOT@/state/requests
+MakeDirectory=yes
+DirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

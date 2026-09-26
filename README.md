@@ -183,7 +183,7 @@ Get-ChildItem -Recurse | Unblock-File
 .\windows\hv.ps1 install
 
 # 配置 Windows 防火墙规则
-.\windows\hv.ps1 firewall
+.\windows\hv.ps1 firewall --apply
 
 # 添加第一台手机的 VPN 配置（会在浏览器里显示二维码）
 .\windows\hv.ps1 vpn add

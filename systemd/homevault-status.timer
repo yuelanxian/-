@@ -1,0 +1,9 @@
+[Unit]
+Description=HomeVault 状态文件更新（每 5 分钟）
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

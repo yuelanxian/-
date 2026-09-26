@@ -1,0 +1,15 @@
+# Gradle / Android Studio 构建产物与本机文件（不要提交）
+.gradle/
+.kotlin/
+build/
+/local.properties
+/captures/
+.externalNativeBuild/
+.cxx/
+.idea/
+*.iml
+# 签名密钥永远不要提交（CI 从仓库 Secrets 解码）
+*.jks
+*.keystore
+*.p12
+/app/release/

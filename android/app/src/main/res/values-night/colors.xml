@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="hv_toolbar">#18292D</color>
+    <color name="hv_status_bar">#101C1F</color>
+    <color name="hv_accent">#7CC6CF</color>
+    <color name="hv_background">#101518</color>
+    <color name="hv_text_secondary">#A7B6BB</color>
+</resources>

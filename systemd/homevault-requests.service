@@ -1,0 +1,8 @@
+[Unit]
+Description=HomeVault 处理面板请求
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@HV_ROOT@/hv requests process

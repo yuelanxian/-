@@ -1,0 +1,15 @@
+# HomeVault 每日备份（由 hv schedule-backup 安装到 /etc/systemd/system/，@HV_ROOT@ 会被替换）
+[Unit]
+Description=HomeVault 备份（restic）
+Documentation=file://@HV_ROOT@/docs/07-备份与恢复.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@HV_ROOT@/hv backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# 备份失败时 systemd 记录为 failed（journalctl -u homevault-backup）
