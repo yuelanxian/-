@@ -269,6 +269,36 @@ out=$(hvc occ twofactorauth:enforce)
 hvc occ app:list --enabled --output=json | grep -q '"admin_audit"' || bail "admin_audit 未启用"
 pass "2FA 强制 / token_auth_enforced / 公开链接关闭 / admin_audit"
 
+step "只信任 Caddy / 面板的固定地址转发的客户端 IP（X-Forwarded-For）"
+CADDY_IP=$(sed -n 's/^HV_CADDY_IP=//p' "$APP/.env")
+PANEL_IP=$(sed -n 's/^HV_PANEL_IP=//p' "$APP/.env")
+FRONT_NET=${PROJECT}_frontend
+[[ $CADDY_IP == "$(cidr_first_host "$SUBNET" | awk -F. '{print $1"."$2"."$3"."$4+1}')" ]] || bail "HV_CADDY_IP=$CADDY_IP 不是网段第 2 个地址"
+cip() { docker inspect -f "{{with index .NetworkSettings.Networks \"$FRONT_NET\"}}{{.IPAddress}}{{end}}" "$(hvc compose ps -q "$1")"; }
+[[ $(cip caddy) == "$CADDY_IP" ]] || bail "caddy 的地址 $(cip caddy) ≠ HV_CADDY_IP $CADDY_IP"
+[[ $(cip panel) == "$PANEL_IP" ]] || bail "panel 的地址 $(cip panel) ≠ HV_PANEL_IP $PANEL_IP"
+[[ $(docker network inspect -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}' "$FRONT_NET") == "$(sed -n 's/^HV_FRONTEND_IP_RANGE=//p' "$APP/.env")" ]] ||
+	bail "前端网络没有 ip_range（自动分配的地址可能抢占固定地址）"
+hvc occ config:system:get trusted_proxies --output=json | tr -d '\r' |
+	jcheck - "sorted(d) == sorted(['$CADDY_IP/32', '$PANEL_IP/32'])" || bail "Nextcloud trusted_proxies 不是 Caddy + 面板"
+bf() { hvc occ security:bruteforce:attempts "$1" --output=json | tr -d '\r' | python3 -c 'import json,sys; print(json.load(sys.stdin)["attempts"])'; }
+NC_IMG=$(sed -n 's/^NEXTCLOUD_IMAGE=//p' "$APP/.env")
+# another container on the frontend network (like wg-easy / ddns-go / backup) cannot spoof its address
+spoof_out=$(docker run --rm --network "$FRONT_NET" --entrypoint sh "$NC_IMG" -c \
+	"hostname -i; curl -s -o /dev/null -w '%{http_code}' -u e2e-nobody:wrong -H 'Host: 127.0.0.1:$HTTPS' -H 'X-Forwarded-For: 203.0.113.77' -X PROPFIND http://app/remote.php/dav/files/e2e-nobody/")
+spoof_ip=$(head -n1 <<<"$spoof_out" | awk '{print $1}')
+[[ $(tail -n1 <<<"$spoof_out") == 401 ]] || bail "伪造请求应得到 401：$spoof_out"
+[[ $(bf 203.0.113.77) == 0 ]] || bail "Nextcloud 采信了非代理容器伪造的 X-Forwarded-For"
+(($(bf "$spoof_ip") >= 1)) || bail "失败登录没有记在真实来源 $spoof_ip 上"
+# through Caddy the client's own X-Forwarded-For is replaced, and Nextcloud uses Caddy's value (not Caddy's IP)
+[[ $(http_code -u e2e-nobody:wrong -H 'X-Forwarded-For: 198.51.100.7' -X PROPFIND "$BASE/remote.php/dav/files/e2e-nobody/") == 401 ]] ||
+	bail "经 Caddy 的错误登录应得到 401"
+[[ $(bf 198.51.100.7) == 0 ]] || bail "Caddy 转发了客户端伪造的 X-Forwarded-For"
+[[ $(bf "$CADDY_IP") == 0 ]] || bail "Nextcloud 把 Caddy 当成了客户端（Caddy 未被信任为代理）"
+gw=$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' "$FRONT_NET")
+for ip in "$spoof_ip" "$gw" 127.0.0.1; do hvc occ security:bruteforce:reset "$ip" >/dev/null 2>&1 || true; done
+pass "Caddy $CADDY_IP / 面板 $PANEL_IP 固定地址；其他容器无法伪造来源 IP"
+
 # ---------------------------------------------------------------------------- 4. abort path
 step "IP 白名单：不匹配的来源被 Caddy 直接断开"
 HV_ROOT=$APP # read by env.sh
@@ -277,7 +307,14 @@ export HV_ROOT
 . "$APP/scripts/env.sh"
 orig_cidrs=$(env_get_file HV_ALLOWED_CIDRS "$APP/.env")
 env_set_file HV_ALLOWED_CIDRS '192.0.2.0/24' "$APP/.env"
+# an old installation's secrets/caddy-dns.env (DNS credentials as env) is migrated to files by `hv up`
+printf 'CF_API_TOKEN=e2e-legacy-token-0123456789abcdefghij\n' >"$APP/secrets/caddy-dns.env"
 hvc up >/dev/null 2>&1 || bail "hv up 失败"
+[[ ! -e $APP/secrets/caddy-dns.env && $(cat "$APP/secrets/caddy-dns/CF_API_TOKEN" 2>/dev/null) == e2e-legacy-token-0123456789abcdefghij ]] ||
+	bail "secrets/caddy-dns.env 未迁移到 secrets/caddy-dns/"
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(hvc compose ps -q caddy)" | grep -q 'CF_API_TOKEN' &&
+	bail "DNS 凭据出现在 caddy 的环境变量中"
+rm -rf "$APP/secrets/caddy-dns"
 aborted=0
 for _ in $(seq 40); do
 	code=$(http_code "$BASE/status.php")
@@ -467,6 +504,49 @@ papi "$PBASE/api/overview" | jcheck - "d['status_updated'] and d['version'] == '
 	bail "面板概览有错误告警"
 pass "status.json / backup-status.json / snapshots.json 与面板一致"
 
+# ---------------------------------------------------------------------------- 10d. data disk not mounted
+step "数据盘未挂载：不自动创建 Nextcloud 文件目录；旧的前端网络自动重建"
+NCDATA=$WORK/data/nextcloud-data
+[[ -e $NCDATA/.ncdata ]] || bail "Nextcloud 文件目录中没有 .ncdata"
+hvc compose stop app cron >/dev/null 2>&1 || bail "停止 app/cron 失败"
+mv "$NCDATA" "$WORK/data/nc-unmounted"
+if hvc compose up -d --no-deps app >"$WORK/nodisk.txt" 2>&1; then
+	bail "数据目录不存在时 app 竟然启动了"
+fi
+[[ ! -e $NCDATA ]] || bail "docker compose 自动创建了 Nextcloud 文件目录（create_host_path 应为 false）"
+if hvc up >"$WORK/nodisk.txt" 2>&1; then
+	bail "数据目录不存在时 hv up 应失败"
+fi
+grep -q '数据盘可能没有挂载' "$WORK/nodisk.txt" || bail "hv up 没有给出数据盘未挂载的提示：$(cat "$WORK/nodisk.txt")"
+[[ ! -e $NCDATA ]] || bail "hv up 自动创建了 Nextcloud 文件目录"
+hvc doctor >"$WORK/doctor-nodisk.txt" 2>&1 && bail "数据目录不存在时 doctor 应报告问题"
+grep -q '✘ Nextcloud 文件目录不存在' "$WORK/doctor-nodisk.txt" || bail "doctor 没有报告数据目录缺失"
+mv "$WORK/data/nc-unmounted" "$NCDATA"
+# an extra storage on an unplugged disk is named (never created) as well
+mv "$EXT" "$EXT.unplugged"
+if hvc up >"$WORK/nodisk.txt" 2>&1; then
+	bail "额外存储目录不存在时 hv up 应失败"
+fi
+grep -q "额外存储「$EXT_NAME」的目录不存在" "$WORK/nodisk.txt" || bail "hv up 没有指出缺失的额外存储：$(cat "$WORK/nodisk.txt")"
+[[ ! -e $EXT ]] || bail "hv up 自动创建了额外存储目录"
+mv "$EXT.unplugged" "$EXT"
+# a frontend network from an older compose.yaml (no ip_range): hv up rebuilds it once
+hvc down >/dev/null 2>&1 || bail "hv down 失败"
+docker network create --driver bridge --subnet "$SUBNET" --label "com.docker.compose.project=$PROJECT" \
+	--label com.docker.compose.network=frontend "$FRONT_NET" >/dev/null || bail "无法创建旧式前端网络"
+hvc up >"$WORK/netmig.txt" 2>&1 || bail "hv up 失败：$(tail -n 5 "$WORK/netmig.txt")"
+grep -q '需要重建 Docker 前端网络' "$WORK/netmig.txt" || bail "hv up 未重建旧式前端网络"
+[[ $(docker network inspect -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}' "$FRONT_NET") == "$(sed -n 's/^HV_FRONTEND_IP_RANGE=//p' "$APP/.env")" ]] ||
+	bail "重建后的前端网络没有 ip_range"
+wait_status_ok || bail "重建网络后 status.php 不可用"
+[[ $(cip caddy) == "$CADDY_IP" && $(cip panel) == "$PANEL_IP" ]] || bail "重建网络后 Caddy/面板地址不对"
+wait_panel || bail "重建网络后面板不可用"
+for _ in $(seq 60); do
+	[[ $(hvc compose ps --format '{{.Health}}' app 2>/dev/null) == healthy ]] && break
+	sleep 3
+done
+pass "数据目录缺失时拒绝启动且不创建目录（hv up / doctor 有中文提示）；旧网络已重建"
+
 # ---------------------------------------------------------------------------- 11. doctor
 step "hv doctor"
 if ! hvc doctor >"$WORK/doctor.txt" 2>&1; then
@@ -476,6 +556,8 @@ fi
 grep -q '✔ 容器 app' "$WORK/doctor.txt" || bail "doctor 输出异常"
 grep -q '✔ 容器 panel' "$WORK/doctor.txt" || bail "doctor 未检查面板容器"
 grep -q '管理面板可访问' "$WORK/doctor.txt" || bail "doctor 未检查面板"
+grep -q '✔ Caddy 固定地址' "$WORK/doctor.txt" || bail "doctor 未检查 Caddy 固定地址"
+grep -q '✔ Nextcloud 文件目录' "$WORK/doctor.txt" || bail "doctor 未检查 Nextcloud 文件目录"
 pass "doctor 通过（警告：$(grep -c '^  !' "$WORK/doctor.txt" || true) 个）"
 
 printf '\n[e2e] 全部通过，用时 %d 秒\n' $((SECONDS - T0))

@@ -177,6 +177,21 @@ hv_check_nc_data() {
 	return 0
 }
 
+# Extra storages are bind mounts with create_host_path: false too (compose.storage.yaml): name the missing
+# ones in Chinese instead of Docker's "bind source path does not exist".
+hv_check_storage_paths() {
+	local i bad=0
+	for i in "${!ST_PATH[@]}"; do
+		[[ -d ${ST_PATH[i]} ]] && continue
+		err "额外存储「${ST_NAME[i]}」的目录不存在：${ST_PATH[i]}（硬盘未挂载？）"
+		bad=1
+	done
+	((bad == 0)) && return 0
+	msg "  HomeVault 不会自动创建这些目录（以免写到系统盘）。挂载硬盘后重新运行：sudo $HV_SELF up"
+	msg "  不再使用的存储可以删除：sudo $HV_SELF storage remove <名称>"
+	return 1
+}
+
 # A frontend network created by an older compose.yaml (without ip_range) or for another subnet is reused
 # as it is by older Compose versions, so a dynamically addressed container could hold Caddy's / the panel's
 # fixed address. Remove the stack's containers and networks once (data is kept); `up` recreates them.
@@ -199,6 +214,7 @@ hv_prepare_up() {
 	caddy_dns_check || true
 	hv_check_nc_data || die "Nextcloud 文件目录不可用，未启动服务"
 	storage_render_if_needed
+	hv_check_storage_paths || die "额外存储的目录不可用，未启动服务"
 	logs_prepare_dirs
 	state_prepare_dirs
 	panel_build_if_needed || die "无法构建管理面板镜像"

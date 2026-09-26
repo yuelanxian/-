@@ -552,6 +552,7 @@ cmd_install() {
 
 	# ---- render & start -----------------------------------------------------
 	hv_write_derived
+	caddy_dns_migrate
 	caddy_dns_check || true
 	storage_render_if_needed
 	vpn_prepare_init

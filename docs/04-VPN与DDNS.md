@@ -131,7 +131,7 @@ curl.exe https://4.ipw.cn
 - ⚠️ **不要**转发 TCP 443、80、8443、9443 或任何其他端口。网页服务只在局域网和 VPN 里使用。
 - 主机的局域网 IP 必须固定：在路由器的"DHCP 静态分配 / IP 与 MAC 绑定"里给主机固定一个地址，见 [docs/02-Linux部署.md](02-Linux部署.md) 和 [docs/03-Windows部署.md](03-Windows部署.md)。
 
-> 社区里有部分网络对 WireGuard 的 UDP 流量有干扰或限速的反馈（多见于跨境线路）。如果某个端口长期不稳定，可以换一个端口。换端口要同时修改服务器（`.env` 里的 `WG_PORT` 以及 VPN 服务端的监听端口）、路由器转发规则和每台设备的客户端配置（重新导入），所以确定下来后尽量不要改。
+> 社区里有部分网络对 WireGuard 的 UDP 流量有干扰或限速的反馈（多见于跨境线路）。如果某个端口长期不稳定，可以换一个端口。换端口要同时修改服务器（`.env` 里的 `WG_PORT` 以及 VPN 服务端的监听端口；Linux 改完 `.env` 后运行 `sudo ./hv up` 和 `sudo ./hv vpn finalize`）、路由器转发规则和每台设备的客户端配置（重新导入），所以确定下来后尽量不要改。
 
 ### 2.3 检查转发是否生效
 
@@ -450,6 +450,7 @@ HomeVault 自己用到的网段也要互相错开：
 | **握手一直没有成功**（上次握手时间为空） | ① 端口转发没设好：协议选了 TCP、端口号不一致、内部 IP 不是 `HV_LAN_IP`；② 光猫在拨号，只在路由器上设了转发；③ 其实没有公网 IP（CGNAT）；④ DDNS 还指向旧 IP；⑤ 手机在家里 Wi-Fi 上（NAT 回流） | ① 对照 [§2.2](#22-添加端口转发规则) 检查；② 按 [§2.1](#21-先弄清楚谁在拨号光猫还是路由器) 在光猫上也设转发，或改桥接；③ 按 [§1](#1-确认你有公网-ipv4) 确认；④ 运行 `ddns status`，对比域名解析结果和当前公网 IP；⑤ 关掉 Wi-Fi 用 4G 测试 |
 | 握手一直不成功（续） | ⑥ 服务端 VPN 没运行 | Linux：`sudo ./hv vpn status` 查看 wg-easy 状态；Windows：`.\windows\hv.ps1 vpn status` 查看隧道服务，并用 `.\windows\hv.ps1 firewall --show` 确认防火墙规则存在（没有就运行 `.\windows\hv.ps1 firewall --apply`） |
 | **握手成功，但打不开 Nextcloud** | ① 手机上的地址不是 `HV_HOST`（例如写成了公网域名 `WG_HOST`，或写错了端口）；② AllowedIPs 里没有 `HV_LAN_IP/32`（手动改过配置）；③ Windows：弱主机模式没生效；④ IP 模式：手机没装根证书，浏览器显示证书错误 | ① 用安装总结或 `status` 里显示的访问地址；② 重新导入配置；③ `.\windows\hv.ps1 vpn status` 检查 Weak Host，详见 [docs/03-Windows部署.md](03-Windows部署.md) §10；④ 见 [docs/05-安卓手机备份.md](05-安卓手机备份.md) 安装证书一节 |
+| **握手成功，但打不开 Nextcloud 和管理面板**（Linux，主机启用了 ufw） | VPN 流量经 wg-easy 转换后，从 Docker 内部网段访问主机的 `HV_LAN_IP`，这类连接要经过主机的入站规则，被 ufw 的"默认拒绝入站"挡住 | 放行这个网段访问 HomeVault 的网页端口：`sudo ufw allow proto tcp from 172.31.250.0/24 to any port 80,443,8443,9443`（网段换成 `.env` 里的 `HV_FRONTEND_SUBNET`，端口按你的设置） |
 | **在家 Wi-Fi 上打不开，4G 却正常** | NAT 回流（VPN 在家也开着）；域名模式下的 DNS 重绑定保护 | 见 [§6](#6-在家时nat-回流hairpin问题) 和 [§6.1](#61-域名模式的特有问题dns-重绑定保护) |
 | **家里 Wi-Fi 正常，4G 不行** | 家里本来就不走 VPN，所以这说明 VPN 这条路没通 | 按"握手一直没有成功"一行检查 |
 | **4G 正常，某个外面的 Wi-Fi 不行** | 该网络屏蔽了 UDP 或这个端口；需要先网页认证的 Wi-Fi 还没登录；网段冲突（`full` 模式） | 先完成 Wi-Fi 的网页认证；换用 4G；长期有问题可考虑换 `WG_PORT`（见 [§2.2](#22-添加端口转发规则)）；网段问题见 [§7](#7-网段冲突为什么-1921681x-不是好选择) |

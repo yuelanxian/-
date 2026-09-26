@@ -374,7 +374,9 @@ services:
       DISABLE_IPV6: "true"
       PORT: "51821"
       TZ: ${HV_TZ:-Asia/Shanghai}
-    # 首次启动的无人值守初始化参数（INIT_*），成功后由 hv vpn finalize 删除
+    # 首次启动的无人值守初始化参数（INIT_*，含初始管理员密码），成功后由 hv vpn finalize 删除文件并重建容器。
+    # 在此之前 INIT_PASSWORD 是容器环境变量（docker inspect 以及经 socket-proxy 的容器详情接口都能读到），
+    # 所以 hv install 在 wg-easy 就绪后立即执行 finalize。
     env_file:
       - path: ./secrets/wg-easy-init.env
         required: false

@@ -172,10 +172,10 @@ hv_canonical_hosts() {
 # panel = network + 3; dynamic addresses come from the upper half of the subnet (ip_range), so a
 # recreated container can never take a fixed address. Leaves the values unchanged for an invalid subnet.
 hv_compute_frontend() {
-	local net len base
-	is_ipv4_cidr "${HV_FRONTEND_SUBNET:-}" || return 0
-	net=$(cidr_network "$HV_FRONTEND_SUBNET")
-	len=${net#*/}
+	local net len base sub=${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+	is_ipv4_cidr "$sub" || return 0
+	net=$(cidr_network "$sub")
+	len=$((10#${net#*/}))
 	((len >= 1 && len <= 29)) || return 0
 	base=$(ip_to_int "${net%/*}")
 	HV_CADDY_IP=$(int_to_ip $((base + 2)))
@@ -274,14 +274,16 @@ hv_validate_env() {
 			rc=1
 		}
 	done
-	if ! is_ipv4_cidr "${HV_FRONTEND_SUBNET:-}"; then
-		err "HV_FRONTEND_SUBNET 不是有效的 IPv4 网段：${HV_FRONTEND_SUBNET:-}（例如 172.31.250.0/24）"
+	# empty = compose default (env_defaults fills it in anyway)
+	local sub=${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+	if ! is_ipv4_cidr "$sub"; then
+		err "HV_FRONTEND_SUBNET 不是有效的 IPv4 网段：$sub（例如 172.31.250.0/24）"
 		rc=1
-	elif ((10#${HV_FRONTEND_SUBNET#*/} < 16 || 10#${HV_FRONTEND_SUBNET#*/} > 28)); then
-		err "HV_FRONTEND_SUBNET 的前缀长度必须在 16–28 之间：$HV_FRONTEND_SUBNET（例如 172.31.250.0/24）"
+	elif ((10#${sub#*/} < 16 || 10#${sub#*/} > 28)); then
+		err "HV_FRONTEND_SUBNET 的前缀长度必须在 16–28 之间：$sub（例如 172.31.250.0/24）"
 		rc=1
-	elif [[ $(cidr_network "$HV_FRONTEND_SUBNET") != "$HV_FRONTEND_SUBNET" ]]; then
-		err "HV_FRONTEND_SUBNET 必须写网段地址：$HV_FRONTEND_SUBNET（应为 $(cidr_network "$HV_FRONTEND_SUBNET")）"
+	elif [[ $(cidr_network "$sub") != "$sub" ]]; then
+		err "HV_FRONTEND_SUBNET 必须写网段地址：$sub（应为 $(cidr_network "$sub")）"
 		rc=1
 	fi
 	if [[ -n ${HV_BIND_IP:-} ]] && ! is_ipv4 "$HV_BIND_IP"; then

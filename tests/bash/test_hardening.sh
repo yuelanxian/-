@@ -31,7 +31,7 @@ test_frontend_subnet_validation() {
 	HV_FRONTEND_SUBNET=172.31.250.5/24 assert_fail hv_validate_env
 	HV_FRONTEND_SUBNET=172.31.250.0/29 assert_fail hv_validate_env
 	HV_FRONTEND_SUBNET=10.0.0.0/8 assert_fail hv_validate_env
-	HV_FRONTEND_SUBNET='' assert_fail hv_validate_env
+	HV_FRONTEND_SUBNET='' assert_ok hv_validate_env # compose default
 	HV_FRONTEND_SUBNET=172.31.250.0 assert_fail hv_validate_env
 }
 
@@ -145,4 +145,16 @@ test_nc_data_guard() {
 	: >"$p/.ncdata"
 	assert_ok hv_check_nc_data
 	HV_NC_DATA_PATH='' assert_ok hv_check_nc_data
+}
+
+test_storage_path_guard_on_up() {
+	ST_NAME=(照片 影视) ST_PATH=("$TMP_ROOT" "$TMP_ROOT/not-mounted-disk")
+	assert_fail hv_check_storage_paths
+	assert_contains "$(hv_check_storage_paths 2>&1)" '额外存储「影视」的目录不存在'
+	assert_not_contains "$(hv_check_storage_paths 2>&1)" '「照片」'
+	[[ ! -e $TMP_ROOT/not-mounted-disk ]] || fail "never created"
+	ST_NAME=(照片) ST_PATH=("$TMP_ROOT")
+	assert_ok hv_check_storage_paths
+	ST_NAME=() ST_PATH=()
+	assert_ok hv_check_storage_paths
 }

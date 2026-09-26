@@ -69,7 +69,7 @@ help_cmd() {
   --nc-data-path <目录>    Nextcloud 文件目录（默认 <数据目录>/nextcloud-data）
   --tls-mode internal|acme-dns   证书模式（默认按 --host 自动选择）
   --dns-provider alidns|tencentcloud|cloudflare  --acme-email <邮箱>
-  --dns-id <ID> --dns-secret-file <文件>          DNS API 凭据（域名模式）
+  --dns-id <ID> --dns-secret-file <文件>          DNS API 凭据（域名模式；保存为 secrets/caddy-dns/ 下每项一个文件）
   --mirror none|daocloud|custom [--mirror-hub 前缀 --mirror-ghcr 前缀]   镜像加速
   --backup-local-path <目录>   本地备份目录（请用另一块硬盘）
   --backup-target s3 --s3-repo <仓库> [--s3-options "<选项>"] --s3-key-id <ID> --s3-secret-file <文件>
@@ -80,7 +80,7 @@ help_cmd() {
   --log-retention <天数>   日志保留天数（1–365，默认 7）
   --no-firewall            不设置主机防火墙；--ufw 非交互时也配置 ufw
   --no-systemd             不安装 systemd 定时任务（维护/状态/备份）
-  --frontend-subnet <网段> Docker 前端网络网段（默认 172.31.250.0/24，与现有网络冲突时更换）
+  --frontend-subnet <网段> Docker 前端网络网段（默认 172.31.250.0/24，前缀 /16–/28；与现有网络冲突时更换）
   --timeout <秒>           等待 Nextcloud 就绪的最长时间（默认 1800）
   --no-start               只写入配置与密钥，不启动服务
 EOF
