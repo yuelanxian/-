@@ -181,15 +181,14 @@ func (m *mockDocker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------- harness
 
 type harness struct {
-	t     *testing.T
-	s     *Server
-	nc    *mockNC
-	dk    *mockDocker
-	root  string
-	cfg   *config.Config
-	jar   map[string]string
-	csrf  string
-	extra map[string]string
+	t    *testing.T
+	s    *Server
+	nc   *mockNC
+	dk   *mockDocker
+	root string
+	cfg  *config.Config
+	jar  map[string]string
+	csrf string
 }
 
 func newHarness(t *testing.T) *harness {

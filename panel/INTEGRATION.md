@@ -422,7 +422,9 @@ SMOKE_PROJECT=hvpanel SMOKE_NC_PORT=19443 SMOKE_PANEL_PORT=19444 SMOKE_SUBNET=17
 冒烟测试覆盖：socket-proxy 放行/拒绝矩阵；真实 Nextcloud 34 Login Flow v2（管理员成功、普通用户被拒且设备密码被吊销）；
 应用密码登录与限速；全部 API（使用本文 §4 规范格式的示例状态文件）；请求文件格式与权限；主机结果文件合并；
 经 socket-proxy 重启 redis；`/ca.crt` 来自 caddy 健康检查复制到 `ca_public` 卷的根证书（与 compose.yaml 相同的机制）且不含私钥；`/download/android`；跨站/缺 CSRF 的 POST 被拒；审计日志；
-退出登录与优雅停机时吊销设备密码；可选的 Playwright 手机/深色/桌面页面截图与 CSP 报错检查。
+退出登录与优雅停机（Compose 默认 10 秒，且有慢速下载进行中）时吊销设备密码；12 个并发猜测无法绕过登录限速；
+经面板重启 caddy（先答复再重启，面板随后恢复）；容器里被注入 `HTTP_PROXY` 时面板仍直连且不向代理泄露应用密码（记录型假代理 `proxyrec`）；
+可选的 Playwright 手机/深色/桌面页面截图与 CSP 报错检查。
 
 ---------------------------------------------------------------------------------------------------
 ## 11. 与 SPEC §15 的差异

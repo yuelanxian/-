@@ -16,8 +16,9 @@ func TestSlug(t *testing.T) {
 	if Slug("/srv/a") == Slug("/srv/b") {
 		t.Fatal("collision")
 	}
-	if Slug("/mnt/照片") != Slug("/mnt/照片") {
-		t.Fatal("not deterministic")
+	// non-ASCII paths hash their UTF-8 bytes (same as bash sha256sum and PowerShell UTF8.GetBytes)
+	if got := Slug("/mnt/照片"); got != "sba02f9ad" {
+		t.Fatalf("utf-8 slug %q", got)
 	}
 }
 
