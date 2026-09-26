@@ -7,6 +7,7 @@
 #   HV_ANDROID_KEY_PASSWORD      密钥密码
 # 未配置时 release 版用本次构建临时生成的 debug 密钥签名：能安装，但每次构建密钥都不同，
 # 以后无法直接覆盖升级（需先卸载）。详见 android/README.md。
+# pull_request 构建（执行 PR 里的代码）永远拿不到签名密钥，只用临时 debug 密钥签名。
 name: Android
 
 on:
@@ -72,6 +73,7 @@ jobs:
 
       - name: Decode release keystore (if configured)
         id: keystore
+        if: github.event_name != 'pull_request'
         shell: bash
         env:
           KEYSTORE_B64: ${{ secrets.HV_ANDROID_KEYSTORE_B64 }}
@@ -87,9 +89,9 @@ jobs:
       - name: Release APK (R8)
         env:
           HV_ANDROID_KEYSTORE_FILE: ${{ steps.keystore.outputs.file }}
-          HV_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.HV_ANDROID_KEYSTORE_PASSWORD }}
-          HV_ANDROID_KEY_ALIAS: ${{ secrets.HV_ANDROID_KEY_ALIAS }}
-          HV_ANDROID_KEY_PASSWORD: ${{ secrets.HV_ANDROID_KEY_PASSWORD }}
+          HV_ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.HV_ANDROID_KEYSTORE_PASSWORD || '' }}
+          HV_ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.HV_ANDROID_KEY_ALIAS || '' }}
+          HV_ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.HV_ANDROID_KEY_PASSWORD || '' }}
         run: ./gradlew --no-daemon ${{ steps.version.outputs.args }} assembleRelease
 
       - name: Remove keystore

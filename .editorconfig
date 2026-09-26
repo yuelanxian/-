@@ -33,5 +33,12 @@ indent_size = 4
 [{*.cmd,*.bat}]
 end_of_line = crlf
 
+# Android (android/)
+[{*.kt,*.kts,*.xml,*.properties}]
+indent_size = 4
+
+[gradlew]
+indent_size = 4
+
 [*.md]
 trim_trailing_whitespace = false

@@ -57,7 +57,7 @@ function Invoke-HvDoctor {
 
     Write-HvStep '容器'
     $rows = @(Get-HvComposePs)
-    foreach ($svc in @('caddy', 'app', 'cron', 'db', 'redis')) {
+    foreach ($svc in @('caddy', 'app', 'cron', 'db', 'redis', 'panel', 'socket-proxy')) {
         $s = Get-HvServiceState -Rows $rows -Service $svc
         if ($null -eq $s) { & $fail ($svc + '：未创建'); continue }
         if ($s.State -ne 'running') { & $fail ($svc + '：' + $s.State) }
@@ -69,7 +69,7 @@ function Invoke-HvDoctor {
         if ($s -and $s.State -eq 'running') { & $ok 'ddns-go：运行中' } else { & $warn 'ddns-go：未运行' }
     }
     $issues = @(Get-HvPublisherIssues -Rows $rows -BindIp (Get-HvEnvDictValue $envv 'HV_BIND_IP' '0.0.0.0') `
-            -AllowedTcpPorts @((Get-HvEnvDictValue $envv 'HV_HTTP_PORT' '80'), (Get-HvEnvDictValue $envv 'HV_HTTPS_PORT' '443'), (Get-HvEnvDictValue $envv 'HV_ADMIN_PORT' '8443')))
+            -AllowedTcpPorts @((Get-HvEnvDictValue $envv 'HV_HTTP_PORT' '80'), (Get-HvEnvDictValue $envv 'HV_HTTPS_PORT' '443'), (Get-HvEnvDictValue $envv 'HV_ADMIN_PORT' '8443'), (Get-HvEnvDictValue $envv 'HV_PANEL_PORT' '9443')))
     if ($issues.Count -eq 0) { & $ok '端口发布：仅 caddy，且只绑定 IPv4' } else { foreach ($i in $issues) { & $fail ('端口发布：' + $i) } }
 
     Write-HvStep 'Nextcloud'
@@ -113,12 +113,23 @@ function Invoke-HvDoctor {
         else { & $ok ('TLS 证书有效期还剩 ' + $days + ' 天（' + $probe.Certificate.Issuer + '）') }
     }
 
+    $panelPort = [int](Get-HvEnvDictValue $envv 'HV_PANEL_PORT' '9443')
+    $pp = Invoke-HvHttpsProbe -Ip $probeIp -Port $panelPort -SniHost $hostName -Path '/healthz'
+    if ($pp.Ok) { & $ok ('管理面板 https://' + $hostName + ':' + $panelPort + ' 正常') }
+    elseif ($pp.Error) { & $fail ('管理面板探测失败：' + $pp.Error) }
+    else { & $fail ('管理面板返回：' + $pp.StatusLine) }
+
     Write-HvStep '网络 / 防火墙 / VPN'
     $ips = @(Get-HvLocalIPv4s)
     if ($lan -and $ips -contains $lan) { & $ok ('局域网 IP 未变化：' + $lan) } else { & $fail ('本机已没有 IP ' + $lan + '：请在路由器上为本机设置固定 IP（DHCP 静态分配），或重新运行 install') }
     $fwNames = @(Get-HvHomeVaultFirewallRules | Where-Object { [string]$_.Enabled -eq 'True' } | ForEach-Object { $_.Name })
     foreach ($spec in @(Get-HvFirewallRuleSpecs -Env $envv)) {
-        if ($fwNames -contains $spec.Name) { & $ok ('防火墙规则 ' + $spec.Name) } else { & $fail ('缺少防火墙规则 ' + $spec.Name + '（管理员运行 firewall --apply）') }
+        if ($fwNames -notcontains $spec.Name) { & $fail ('缺少防火墙规则 ' + $spec.Name + '（管理员运行 firewall --apply）'); continue }
+        $have = @()
+        try { $have = @((Get-NetFirewallRule -Name $spec.Name -ErrorAction Stop | Get-NetFirewallPortFilter).LocalPort | ForEach-Object { [string]$_ }) } catch { }
+        $missing = @(@($spec.LocalPort) | Where-Object { $have -notcontains [string]$_ })
+        if ($have.Count -gt 0 -and $missing.Count -gt 0) { & $fail ('防火墙规则 ' + $spec.Name + ' 未包含端口 ' + ($missing -join ',') + '（管理员运行 firewall --apply 更新）') }
+        else { & $ok ('防火墙规则 ' + $spec.Name) }
     }
     $docker = @(Get-HvDockerFirewallRules)
     if ($docker.Count -gt 0 -and $fwNames -notcontains 'HomeVault-Block-Other') { & $warn ('Docker Desktop 有 ' + $docker.Count + ' 条放行规则，且缺少 HomeVault 阻止规则') }
@@ -128,6 +139,7 @@ function Invoke-HvDoctor {
         if ($svc -and [string]$svc.StartType -ne 'Automatic') { & $warn ('隧道服务启动类型为 ' + [string]$svc.StartType) }
         if (Test-HvWeakHost) { & $ok 'Weak Host 已在隧道网卡上开启' } else { & $fail 'Weak Host 未开启（VPN 客户端无法访问局域网 IP）' }
         if (Get-ScheduledTask -TaskName $script:HvWeakHostTask -ErrorAction SilentlyContinue) { & $ok ('计划任务 ' + $script:HvWeakHostTask) } else { & $warn ('缺少计划任务 ' + $script:HvWeakHostTask) }
+        if (Get-ScheduledTask -TaskName 'HomeVault-VpnStatus' -ErrorAction SilentlyContinue) { & $ok '计划任务 HomeVault-VpnStatus（管理面板 VPN 页）' } else { & $warn '缺少计划任务 HomeVault-VpnStatus（管理面板看不到 VPN 设备在线状态；重新运行 install）' }
     }
 
     Write-HvStep '磁盘空间'
@@ -153,7 +165,15 @@ function Invoke-HvDoctor {
     $t = Get-HvEnvDictValue $envv 'HV_BACKUP_TARGET'
     if ($t -ne 'local' -and $t -ne 's3') { & $warn '未配置备份（HV_BACKUP_TARGET）' }
     else {
-        $f = Get-HvPath 'state\last-backup-ok'
+        $f = Get-HvPath (Join-HvPath 'state' 'last-backup-ok')
+        $bsf = Get-HvPath (Join-HvPath 'state' 'backup-status.json')
+        if ([System.IO.File]::Exists($bsf)) {
+            try {
+                $bs = ConvertFrom-Json -InputObject (Read-HvTextFile $bsf)
+                $bst = [string](Get-HvPropValue $bs 'state' '')
+                if ($bst -eq 'failed' -or $bst -eq 'partial') { & $fail ('最近一次备份' + @{ failed = '失败'; partial = '不完整' }[$bst] + '：' + [string](Get-HvPropValue $bs 'message' '') + '（日志 ' + [string](Get-HvPropValue $bs 'log_file' '') + '）') }
+            } catch { }
+        }
         $age = $null
         if ([System.IO.File]::Exists($f)) { $age = Get-HvBackupAgeHours -IsoText (Read-HvTextFile $f) -Now (Get-Date) }
         if ($null -eq $age) { & $fail '还没有成功的备份（运行 backup --init）' }
@@ -165,6 +185,19 @@ function Invoke-HvDoctor {
     Write-HvStep '权限'
     if (Test-HvPrivateAcl (Get-HvSecretsDir)) { & $ok 'secrets\ 仅限 SYSTEM / 管理员 / 当前用户' } else { & $fail 'secrets\ 权限过宽（重新运行 install 修复）' }
     if (Test-HvPrivateAcl (Get-HvEnvPath)) { & $ok '.env 权限已收紧' } else { & $warn '.env 权限较宽' }
+
+    Write-HvStep '日志与维护任务'
+    $ld = Get-HvEnvLogDir
+    if ($ld -and [System.IO.Directory]::Exists($ld)) { & $ok ('日志目录 ' + $ld + '（保留 ' + (Get-HvEnvDictValue $envv 'HV_LOG_RETENTION_DAYS' '7') + ' 天）') }
+    else { & $fail ('日志目录不存在：' + $ld + '（运行 up 或 install 创建）') }
+    foreach ($tn in @('HomeVault-Maintenance', 'HomeVault-Requests')) {
+        if (Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue) { & $ok ('计划任务 ' + $tn) } else { & $warn ('缺少计划任务 ' + $tn + '（重新运行 install 创建）') }
+    }
+    $sf = Get-HvPath (Join-HvPath 'state' 'status.json')
+    if ([System.IO.File]::Exists($sf)) {
+        $ageH = ((Get-Date) - [System.IO.File]::GetLastWriteTime($sf)).TotalHours
+        if ($ageH -gt 36) { & $warn ('state\status.json 已 ' + [int]$ageH + ' 小时未更新（每日维护任务可能未运行）') } else { & $ok '每日维护状态已更新' }
+    } else { & $warn '还没有 state\status.json（每日维护任务尚未运行过）' }
 
     Write-HvStep '开机自启（无人值守）'
     $a = Get-HvAutostartState

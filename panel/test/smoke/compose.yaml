@@ -49,13 +49,31 @@ services:
     environment:
       SMOKE_NC_PORT: ${SMOKE_NC_PORT:-19443}
       SMOKE_PANEL_PORT: ${SMOKE_PANEL_PORT:-19444}
+      # the healthcheck copies the local CA root (public part only) into ca_public, as in compose.yaml
+      HV_TLS_SNIPPET: internal
+      HV_HTTPS_PORT: ${SMOKE_NC_PORT:-19443}
     ports:
       - "127.0.0.1:${SMOKE_NC_PORT:-19443}:${SMOKE_NC_PORT:-19443}"
       - "127.0.0.1:${SMOKE_PANEL_PORT:-19444}:${SMOKE_PANEL_PORT:-19444}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
+      - ca_public:/ca-public
     networks: [frontend]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          s=/data/caddy/pki/authorities/local/root.crt; d=/ca-public/root.crt;
+          if [ "$$HV_TLS_SNIPPET" = internal ] && [ -s "$$s" ]; then
+          cmp -s "$$s" "$$d" || { cp "$$s" "$$d.tmp" && chmod 0644 "$$d.tmp" && mv -f "$$d.tmp" "$$d"; };
+          else rm -f "$$d"; fi >/dev/null 2>&1;
+          nc -z -w 3 127.0.0.1 "$$HV_HTTPS_PORT"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+      start_interval: 2s
   socket-proxy:
     image: ${SOCKET_PROXY_IMAGE:-linuxserver/socket-proxy:3.4.5-r0-ls99}
     restart: unless-stopped
@@ -107,6 +125,15 @@ services:
       HV_VERSION: "1.0.0-smoke"
       TZ: Asia/Shanghai
       ADMIN_RECHECK: 30s
+      CA_CERT_FILE: /ca/root.crt
+      # Docker Compose copies the client's ~/.docker/config.json "proxies" into every container
+      # (common in China). The panel must ignore them for its internal calls: proxyrec records
+      # anything that is (wrongly) sent to it — e.g. Basic-auth app passwords.
+      HTTP_PROXY: http://proxyrec:3128
+      http_proxy: http://proxyrec:3128
+      HTTPS_PROXY: http://proxyrec:3128
+      https_proxy: http://proxyrec:3128
+      NO_PROXY: localhost,127.0.0.1
     volumes:
       - ./data/logs:/logs:ro
       - ./data/logs/panel:/logs/panel
@@ -115,7 +142,15 @@ services:
       - ./data/backup:/stat/backup:ro
       - ./data/photos:/stat/storage/${SMOKE_SLUG:-s79bc008a}:ro
       - ./data/storage.conf:/config/storage.conf:ro
+      - ca_public:/ca:ro
     networks: [frontend, dockerapi]
+  proxyrec:
+    image: ${ALPINE_IMAGE:-alpine:3.22}
+    command:
+      - sh
+      - -c
+      - "while true; do printf 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' | nc -l -p 3128; done"
+    networks: [frontend]
 networks:
   frontend:
     ipam:
@@ -128,3 +163,4 @@ volumes:
   pg:
   html:
   caddy_data:
+  ca_public:

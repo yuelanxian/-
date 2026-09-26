@@ -96,13 +96,25 @@ type ServerInfo struct {
 
 // New returns a client with sane timeouts.
 func New(internal, public *url.URL, hostHeader, userAgent string) *Client {
+	// Own transport WITHOUT proxy: Docker Compose injects the client's configured proxies
+	// (HTTP_PROXY/HTTPS_PROXY) into every container, and http.DefaultTransport would send the
+	// internal Nextcloud requests — Basic-auth app passwords included — to that proxy.
+	tr := &http.Transport{
+		Proxy:                 nil,
+		MaxIdleConns:          8,
+		IdleConnTimeout:       60 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ForceAttemptHTTP2:     false,
+	}
 	return &Client{
 		Internal:   internal,
 		Public:     public,
 		HostHeader: hostHeader,
 		UserAgent:  userAgent,
 		HTTP: &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: tr,
+			Timeout:   30 * time.Second,
 			// Never follow redirects: a redirect usually means a login page or a misconfiguration.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},

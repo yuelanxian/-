@@ -24,12 +24,38 @@ function Get-HvCanonicalUrl {
     return ('https://' + $h + ':' + $p)
 }
 
+function Get-HvPanelUrl {
+    # Management panel: https://HV_HOST:HV_PANEL_PORT (SPEC section 15).
+    $h = Get-HvEnvValue 'HV_HOST' (Get-HvEnvValue 'HV_LAN_IP')
+    return ('https://' + $h + ':' + (Get-HvEnvValue 'HV_PANEL_PORT' '9443'))
+}
+
+function Test-HvPanelImage {
+    $img = Get-HvEnvValue 'PANEL_IMAGE' 'homevault/panel:1.0.0'
+    $r = Invoke-HvNative -FilePath 'docker' -ArgumentList @('image', 'inspect', '--format', '{{.Id}}', $img) -Capture -AllowFailure
+    return ($r.ExitCode -eq 0)
+}
+
+function Invoke-HvPanelBuild {
+    # The panel image is always built locally from panel/ (never pulled; see compose.yaml).
+    param([switch]$IfMissing)
+    if (-not [System.IO.File]::Exists((Join-HvPath (Get-HvPath 'panel') 'Dockerfile'))) {
+        Write-HvWarn '缺少 panel\Dockerfile（仓库不完整？），跳过管理面板镜像构建。'
+        return
+    }
+    if ($IfMissing -and (Test-HvPanelImage)) { return }
+    Write-HvStep '构建管理面板镜像（本机构建，首次约需 1-3 分钟）...'
+    [void](Invoke-HvCompose -Arguments @('build', 'panel'))
+}
+
 function Invoke-HvUp {
     Update-HvDerivedEnv
+    Initialize-HvRuntimeDirs
     [void](Write-HvComposeStorageFile)
+    Invoke-HvPanelBuild -IfMissing
     Write-HvStep '启动 HomeVault ...'
     [void](Invoke-HvCompose -Arguments @('up', '-d', '--remove-orphans'))
-    Write-HvOk ('已启动：' + (Get-HvCanonicalUrl))
+    Write-HvOk ('已启动：' + (Get-HvCanonicalUrl) + '；管理面板：' + (Get-HvPanelUrl))
 }
 
 function Invoke-HvCmdUp {
@@ -67,12 +93,26 @@ function Invoke-HvCmdStatus {
     [void](Invoke-HvCompose -Arguments @('ps', '-a'))
     Write-Host ''
     Write-HvInfo ('访问地址：' + (Get-HvCanonicalUrl))
+    Write-HvInfo ('管理面板：' + (Get-HvPanelUrl))
+    $ld = Get-HvEnvLogDir
+    if ($ld) { Write-HvInfo ('日志目录：' + $ld + '（保留 ' + (Get-HvEnvValue 'HV_LOG_RETENTION_DAYS' '7') + ' 天）') }
     if ((Test-HvWindows) -and (Test-HvTrue (Get-HvEnvValue 'HV_VPN_ENABLED' 'true'))) {
         $svc = Get-HvTunnelService
         if ($svc) { Write-HvInfo ('WireGuard 隧道服务：' + [string]$svc.Status) } else { Write-HvInfo 'WireGuard 隧道服务：未安装' }
     }
     $f = Get-HvPath (Join-HvPath 'state' 'last-backup-ok')
     if ([System.IO.File]::Exists($f)) { Write-HvInfo ('最近一次成功备份：' + (Read-HvTextFile $f).Trim()) } else { Write-HvInfo '最近一次成功备份：无' }
+    $bs = Get-HvPath (Join-HvPath 'state' 'backup-status.json')
+    if ([System.IO.File]::Exists($bs)) {
+        try {
+            $j = ConvertFrom-Json -InputObject (Read-HvTextFile $bs)
+            $stText = @{ ok = '成功'; failed = '失败'; partial = '不完整'; running = '进行中'; never = '从未' }
+            $st = [string](Get-HvPropValue $j 'state' '')
+            $label = $st
+            if ($stText.ContainsKey($st)) { $label = $stText[$st] }
+            Write-HvInfo ('最近一次备份：' + $label + '（' + [string](Get-HvPropValue $j 'last_run' '') + '）' + [string](Get-HvPropValue $j 'message' ''))
+        } catch { }
+    }
 }
 
 function Invoke-HvCmdLogs {
@@ -118,10 +158,12 @@ function Invoke-HvCmdUpdate {
         elseif (-not (Read-HvYesNo '未配置备份，升级前无法自动备份。仍然继续？' $false)) { Stop-Hv '已取消。' }
     }
     Update-HvDerivedEnv
+    Initialize-HvRuntimeDirs
     [void](Write-HvComposeStorageFile)
     Write-HvStep '拉取新镜像 ...'
     [void](Invoke-HvCompose -Arguments @('pull', '--ignore-buildable'))
     if ((Get-HvEnvValue 'HV_TLS_MODE' 'internal') -eq 'acme-dns') { [void](Invoke-HvCompose -Arguments @('build', '--pull', 'caddy')) }
+    Invoke-HvPanelBuild
     Write-HvStep '重建容器（Nextcloud 会在启动时自动执行 occ upgrade）...'
     [void](Invoke-HvCompose -Arguments @('up', '-d', '--remove-orphans'))
     [void](Wait-HvHealthy -TimeoutSec 1800)

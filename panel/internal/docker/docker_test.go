@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,8 +134,9 @@ func TestServicesLogsRestart(t *testing.T) {
 	if err != nil || string(out) != "raw tty line\n" {
 		t.Fatalf("tty logs = %q %v", out, err)
 	}
-	out, trunc, err = c.Logs(ctx, &list[0], 50, false, 5)
-	if err != nil || !trunc || string(out) != "out l" {
+	// over the byte limit: the NEWEST output is kept, starting at a line boundary
+	out, trunc, err = c.Logs(ctx, &list[0], 50, false, 12)
+	if err != nil || !trunc || string(out) != "err line\n" {
 		t.Fatalf("limited logs = %q %v %v", out, trunc, err)
 	}
 	if err := c.Restart(ctx, &list[0], 30); err != nil {
@@ -158,5 +160,26 @@ func TestServicesLogsRestart(t *testing.T) {
 	}
 	if err := c.Restart(ctx, &Container{ID: "../../images/create"}, 1); err == nil {
 		t.Fatal("invalid id accepted")
+	}
+}
+
+func TestTailBufferKeepsNewest(t *testing.T) {
+	tb := &tailBuffer{max: 100 << 10}
+	var last string
+	for i := 0; i < 20000; i++ {
+		last = fmt.Sprintf("line %05d %s\n", i, strings.Repeat("x", 40))
+		_, _ = tb.Write([]byte(last))
+		if cap(tb.buf) > 3*(100<<10) {
+			t.Fatalf("buffer grew to %d bytes", cap(tb.buf))
+		}
+	}
+	out, trunc := tb.Result()
+	if !trunc || len(out) > 100<<10 || !strings.HasSuffix(string(out), last) || !strings.HasPrefix(string(out), "line ") {
+		t.Fatalf("trunc=%v len=%d head=%q", trunc, len(out), out[:min(len(out), 20)])
+	}
+	small := &tailBuffer{max: 1 << 20}
+	_, _ = small.Write([]byte("a\nb\n"))
+	if out, trunc := small.Result(); trunc || string(out) != "a\nb\n" {
+		t.Fatalf("small = %q %v", out, trunc)
 	}
 }

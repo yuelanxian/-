@@ -16,17 +16,21 @@
     <string name="setup_open_vpn">打开 VPN 应用</string>
     <string name="setup_testing">正在连接 %1$s …</string>
     <string name="setup_port_added">未填写端口，已使用管理面板默认端口 9443。</string>
+    <string name="setup_extra_dropped">只需要“https://地址:端口”，已去掉后面的路径和参数。</string>
+    <string name="setup_nextcloud_filled">已按服务器的设置填入 Nextcloud 网页地址：%1$s</string>
 
     <string name="url_error_empty">请输入管理面板地址</string>
     <string name="url_error_not_https">只支持 https:// 地址（HomeVault 始终使用加密连接）</string>
     <string name="url_error_invalid">地址格式不正确，例如 https://192.168.1.10:9443</string>
     <string name="url_error_no_host">地址中缺少服务器的 IP 或域名</string>
     <string name="url_error_credentials">地址中不能包含用户名或密码</string>
-    <string name="url_error_query">地址中不能包含“?”或“#”及其后面的内容</string>
     <string name="url_error_port">端口号必须在 1–65535 之间</string>
 
-    <string name="test_ok">连接成功（HTTP %1$d），证书有效。</string>
+    <string name="test_ok_panel">连接成功，证书有效：这是 HomeVault 管理面板（版本 %1$s）。点“保存并打开”即可。</string>
     <string name="test_ok_nextcloud">能连上，但这看起来是 Nextcloud 的地址，不是管理面板。管理面板默认端口是 9443，例如 https://192.168.1.10:9443。</string>
+    <string name="test_not_panel">能连上，证书也有效，但这个地址不是 HomeVault 管理面板（HTTP %1$d）。请检查端口：管理面板默认是 9443（Linux 服务器上的 8443 是 VPN 管理页）。</string>
+    <string name="test_server_error">证书有效，但管理面板暂时没有响应（HTTP %1$d）。服务器可能正在启动或更新，请稍后再试；一直这样请在服务器上做一次健康检查（Linux：./hv doctor；Windows：“HomeVault 管理”菜单 → 13 健康检查）。</string>
+    <string name="test_tls_failed">无法建立加密连接（%1$s）。\n• 请确认端口是管理面板的 HTTPS 端口（默认 9443）；\n• 请使用服务器安装完成时显示的地址（服务器只为这些 IP / 域名提供证书）。</string>
     <string name="test_cert_untrusted">能连上服务器，但手机还不信任它的证书。IP 地址模式需要先在手机上安装 HomeVault 根证书，请点“证书安装说明”。</string>
     <string name="test_cert_mismatch">证书与这个地址不匹配。请使用服务器安装完成时显示的地址（证书只对那些 IP / 域名有效）。</string>
     <string name="test_host_unknown">找不到这个域名。请检查拼写；在外面使用时请先打开 VPN。</string>
@@ -48,8 +52,9 @@
     <string name="error_title">无法打开管理面板</string>
     <string name="error_host_lookup">找不到服务器 %1$s。\n\n在外面使用时请先打开 VPN；也请检查地址是否填写正确。</string>
     <string name="error_connect">连接不上 %1$s。\n\n• 在家：确认手机连的是家里的 Wi-Fi，并且服务器已开机。\n• 在外面：先打开 VPN（WG Tunnel 或 WireGuard），再点“重试”。</string>
+    <string name="error_tls">无法和 %1$s 建立加密连接（HTTPS 握手失败）。\n\n• 请确认端口是管理面板的 HTTPS 端口（默认 9443）；\n• 请使用服务器安装完成时显示的地址（点“更换服务器”修改）；\n• 服务器刚启动或刚更新时，请稍等片刻再点“重试”。</string>
     <string name="error_ssl">服务器证书不受信任，已停止加载（为了安全，本应用不会忽略证书错误）。请按“证书安装说明”在手机上安装 HomeVault 根证书，然后点“重试”。</string>
-    <string name="error_http">管理面板暂时不可用（HTTP %1$d）。服务器可能正在启动或更新，请稍后重试；如果一直这样，请在服务器上运行 hv doctor 检查。</string>
+    <string name="error_http">管理面板暂时不可用（HTTP %1$d）。服务器可能正在启动或更新，请稍后重试；如果一直这样，请在服务器上做一次健康检查（Linux：./hv doctor；Windows：“HomeVault 管理”菜单 → 13 健康检查）。</string>
     <string name="error_generic">加载失败：%1$s\n\n在外面使用时请先打开 VPN。</string>
     <string name="error_renderer_gone">网页组件意外退出，正在重新加载。</string>
 
@@ -62,7 +67,8 @@
     <string name="cert_reason_other">证书无效</string>
     <string name="cert_reason_unknown">未能确认（请先测试连接）</string>
     <string name="cert_issuer_unknown">未知</string>
-    <string name="cert_message">为了你的数据安全，本应用不会忽略证书错误。\n\n原因：%1$s\n证书颁发者：%2$s\n\n服务器使用 IP 地址（内部证书）模式时，需要在手机上安装一次 HomeVault 根证书：\n\n1. 点“下载根证书”，用浏览器下载 ca.crt（%3$s）。浏览器会提示“您的连接不是私密连接”，这是因为证书还没安装，点“高级”→“继续前往”即可。也可以在服务器上用 hv ca 命令导出证书文件，再通过数据线或聊天软件发到手机。\n\n2. 打开 设置 → 安全（或“安全与隐私”→“更多安全设置”）→ 加密与凭据 → 安装证书 → CA 证书 → 仍然安装，选择刚下载的 ca.crt。各品牌手机的菜单名称不同，可以在设置里搜索“证书”。\n\n3. 安装后可在“受信任的凭据 → 用户”里查看这个证书，SHA-256 指纹应与服务器上 hv ca 显示的一致。\n\n4. 回到本应用点“刷新”。装好后 Nextcloud 应用和手机浏览器也会信任这个证书。\n\n如果原因是“地址不匹配”，请改用服务器安装完成时显示的地址。</string>
+    <string name="value_unknown">未知</string>
+    <string name="cert_message">为了你的数据安全，本应用不会忽略证书错误。\n\n原因：%1$s\n证书颁发者：%2$s\n\n服务器使用 IP 地址（内部证书）模式时，需要在手机上安装一次 HomeVault 根证书：\n\n1. 点“下载根证书”，用浏览器下载 ca.crt（%3$s）。浏览器会提示“您的连接不是私密连接”，这是因为证书还没安装，点“高级”→“继续前往”即可。也可以在服务器上用 hv ca 命令（Windows：hv.ps1 ca）导出证书文件，再通过数据线或聊天软件发到手机。\n\n2. 打开 设置 → 安全（或“安全与隐私”→“更多安全设置”）→ 加密与凭据 → 安装证书 → CA 证书 → 仍然安装，选择刚下载的 ca.crt。各品牌手机的菜单名称不同，可以在设置里搜索“证书”。\n\n3. 安装后可在“受信任的凭据 → 用户”里查看这个证书，SHA-256 指纹应与服务器上 hv ca（Windows：hv.ps1 ca）显示的一致。\n\n4. 回到本应用点“刷新”。装好后 Nextcloud 应用和手机浏览器也会信任这个证书。\n\n如果原因是“地址不匹配”，请改用服务器安装完成时显示的地址。</string>
     <string name="cert_download">下载根证书</string>
     <string name="cert_open_settings">打开安全设置</string>
 

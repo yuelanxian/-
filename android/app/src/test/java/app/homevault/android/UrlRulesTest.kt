@@ -35,9 +35,28 @@ class UrlRulesTest {
     }
 
     @Test
-    fun port443IsOmittedAndPathKept() {
+    fun port443IsOmittedAndPanelUrlIsReducedToItsOrigin() {
         assertEquals("https://nas.example.com", ok("https://nas.example.com:443").url)
-        assertEquals("https://nas.example.com:9443/panel", ok("https://nas.example.com:9443/panel/").url)
+        assertFalse(ok("https://nas.example.com:9443/").extraDropped)
+        // The panel only lives at "/": paths, queries and copied "#/route" fragments are dropped.
+        val withPath = ok("https://nas.example.com:9443/panel/")
+        assertEquals("https://nas.example.com:9443", withPath.url)
+        assertTrue(withPath.extraDropped)
+        assertEquals("https://192.168.1.10:9443", ok("https://192.168.1.10:9443/#/storage").url)
+        assertEquals("https://192.168.1.10:9443", ok("192.168.1.10:9443/?a=b").url)
+        assertTrue(ok("192.168.1.10:9443/?a=b").extraDropped)
+    }
+
+    @Test
+    fun schemeTyposAreRejected() {
+        assertEquals(UrlRules.Problem.INVALID, problem("https:/192.168.1.10:9443"))
+        assertEquals(UrlRules.Problem.INVALID, problem("https:192.168.1.10"))
+        assertEquals(UrlRules.Problem.INVALID, problem("https//192.168.1.10:9443"))
+        assertEquals(UrlRules.Problem.NOT_HTTPS, problem("http:192.168.1.10"))
+        assertEquals(UrlRules.Problem.NOT_HTTPS, problem("javascript:alert(1)"))
+        assertEquals(UrlRules.Problem.NOT_HTTPS, problem("file:///sdcard/x"))
+        // host:port without a scheme is still fine
+        assertEquals("https://nas.lan:9443", ok("nas.lan:9443").url)
     }
 
     @Test
@@ -55,8 +74,7 @@ class UrlRulesTest {
     fun invalidInputsAreRejected() {
         assertEquals(UrlRules.Problem.EMPTY, problem("   "))
         assertEquals(UrlRules.Problem.CREDENTIALS, problem("https://admin:secret@192.168.1.10:9443"))
-        assertEquals(UrlRules.Problem.QUERY, problem("https://192.168.1.10:9443/?a=b"))
-        assertEquals(UrlRules.Problem.QUERY, problem("https://192.168.1.10:9443/#x"))
+        assertEquals(UrlRules.Problem.CREDENTIALS, problem("admin@192.168.1.10:9443"))
         assertEquals(UrlRules.Problem.BAD_PORT, problem("https://192.168.1.10:99999"))
         assertEquals(UrlRules.Problem.BAD_PORT, problem("https://192.168.1.10:0"))
         assertEquals(UrlRules.Problem.INVALID, problem("https://my host:9443"))
@@ -71,6 +89,10 @@ class UrlRulesTest {
         assertFalse(parsed.portAdded)
         assertEquals("https://192.168.1.10", UrlRules.defaultNextcloudUrl("https://192.168.1.10:9443"))
         assertEquals("https://[fd00::10]", UrlRules.defaultNextcloudUrl("https://[fd00::10]:9443"))
+        // Nextcloud keeps its path but never a query / fragment (could carry tokens).
+        val nc = UrlRules.parseNextcloudUrl("https://192.168.1.10:8444/apps/files/?dir=/x#y") as UrlRules.Parsed.Ok
+        assertEquals("https://192.168.1.10:8444/apps/files", nc.url)
+        assertTrue(nc.extraDropped)
     }
 
     @Test
@@ -107,6 +129,12 @@ class UrlRulesTest {
         assertEquals("192.168.1.10:9443", UrlRules.displayHost("https://192.168.1.10:9443"))
         assertEquals("nas.example.com", UrlRules.displayHost("https://nas.example.com"))
         assertEquals("https://192.168.1.10:9443/ca.crt", UrlRules.caCertificateUrl("https://192.168.1.10:9443/"))
+        // Always at the root, even for an address saved with a path by an older version.
+        assertEquals("https://192.168.1.10:9443/ca.crt", UrlRules.caCertificateUrl("https://192.168.1.10:9443/x/y"))
+        assertEquals("https://nas.example.com/api/info", UrlRules.panelInfoUrl("https://NAS.example.com:443/a"))
+        assertEquals("https://192.168.1.10/status.php", UrlRules.nextcloudStatusUrl("https://192.168.1.10"))
+        assertEquals("https://[fd00::10]:9443", UrlRules.originUrl("https://[fd00::10]:9443/x?y"))
+        assertNull(UrlRules.originUrl("about:blank"))
         assertTrue(UrlRules.isHttps("https://x"))
         assertFalse(UrlRules.isHttps("blob:https://x/1"))
     }

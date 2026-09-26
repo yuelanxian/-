@@ -31,8 +31,8 @@ type Config struct {
 	StateDir    string // STATE_DIR (/state)
 	StatDir     string // STAT_DIR (/stat)
 	StorageConf []string
-	CACertFile  string // CA_CERT_FILE
-	APKFile     string // APK_FILE
+	CACertFiles []string // CA_CERT_FILE, else /ca/root.crt (ca_public volume) then STATE_DIR/ca.crt
+	APKFile     string   // APK_FILE
 
 	SessionTTL        time.Duration // SESSION_TTL (12h)
 	RecheckInterval   time.Duration // ADMIN_RECHECK (5m)
@@ -46,6 +46,9 @@ type Config struct {
 	MaxSessions       int
 	MaxLogLines       int
 	MaxGzipInputBytes int64
+
+	// Warnings are non-fatal configuration problems (logged at startup).
+	Warnings []string
 }
 
 // DefaultRestartAllowList are the compose services the panel may restart (SPEC §15).
@@ -80,7 +83,11 @@ func FromLookup(lookup func(string) (string, bool)) (*Config, error) {
 		MaxGzipInputBytes: 64 << 20,
 	}
 	c.AuditLog = get("AUDIT_LOG", strings.TrimRight(c.LogDir, "/")+"/panel/panel.log")
-	c.CACertFile = get("CA_CERT_FILE", strings.TrimRight(c.StateDir, "/")+"/ca.crt")
+	if v := get("CA_CERT_FILE", ""); v != "" {
+		c.CACertFiles = []string{v}
+	} else {
+		c.CACertFiles = []string{"/ca/root.crt", strings.TrimRight(c.StateDir, "/") + "/ca.crt"}
+	}
 	c.APKFile = get("APK_FILE", strings.TrimRight(c.StateDir, "/")+"/app/homevault.apk")
 	c.StorageConf = splitList(get("STORAGE_CONF", "/config/storage.conf,"+strings.TrimRight(c.StateDir, "/")+"/storage.conf"))
 
@@ -119,13 +126,15 @@ func FromLookup(lookup func(string) (string, bool)) (*Config, error) {
 		c.TrustedProxies = append(c.TrustedProxies, pfx)
 	}
 
+	// Only a display fallback (state/status.json wins): a hand-edited bad value must not stop the panel.
 	c.DefaultRetention = 7
 	if v := get("HV_LOG_RETENTION_DAYS", ""); v != "" {
 		n, perr := strconv.Atoi(v)
 		if perr != nil || n < 1 || n > 365 {
-			return nil, fmt.Errorf("HV_LOG_RETENTION_DAYS: must be an integer 1-365, got %q", v)
+			c.Warnings = append(c.Warnings, fmt.Sprintf("HV_LOG_RETENTION_DAYS=%q is not an integer 1-365, using 7", v))
+		} else {
+			c.DefaultRetention = n
 		}
-		c.DefaultRetention = n
 	}
 
 	c.RestartAllowList = DefaultRestartAllowList

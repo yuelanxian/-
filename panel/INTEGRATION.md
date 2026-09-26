@@ -19,7 +19,7 @@ docker build -t homevault/panel:1.0.0 panel/
 docker build -t homevault/panel:1.0.0 --build-arg REGISTRY=docker.m.daocloud.io/library panel/
 ```
 
-构建参数：`REGISTRY`（默认 `docker.io/library`，即 `<HV_MIRROR_HUB>/library`）、`GO_IMAGE`（默认 `golang:1.26-alpine`）、
+构建参数：`REGISTRY`（默认 `docker.io/library`；compose 传 `${HV_MIRROR_HUB:-docker.io/}library`，`HV_MIRROR_HUB` 以 `/` 结尾）、`GO_IMAGE`（默认 `golang:1.26-alpine`）、
 `VERSION`（默认 `1.0.0`，写入二进制，`/panel version` 与页面“管理面板版本”显示）。
 
 **不要从镜像仓库拉取 `homevault/panel`**：Docker Hub 上的 `homevault/*` 不属于本项目（可能被他人抢注）。
@@ -57,7 +57,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-    logging: *default-logging   # 与其他服务相同的 json-file 10m×3
+    logging: *logging   # 与其他服务相同的 json-file 10m×3
 
   panel:
     image: ${PANEL_IMAGE:-homevault/panel:1.0.0}
@@ -65,7 +65,7 @@ services:
     build:
       context: ./panel
       args:
-        REGISTRY: ${HV_MIRROR_HUB:-docker.io}/library
+        REGISTRY: ${HV_MIRROR_HUB:-docker.io/}library   # HV_MIRROR_HUB 形如 docker.m.daocloud.io/
     restart: unless-stopped
     user: "65532:65532"
     read_only: true
@@ -78,15 +78,50 @@ services:
       NC_INTERNAL_URL: http://app:80
       DOCKER_HOST: tcp://socket-proxy:2375
       COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-homevault}
+      LOG_DIR: /logs
+      STATE_DIR: /state
+      STAT_DIR: /stat
+      CA_CERT_FILE: /ca/root.crt
       PANEL_TRUSTED_PROXIES: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
       HV_LOG_RETENTION_DAYS: ${HV_LOG_RETENTION_DAYS:-7}
+      HV_VERSION: ${HV_VERSION:-}                      # 由 hv / hv.ps1 通过进程环境传入；可为空
       TZ: ${HV_TZ:-Asia/Shanghai}
     volumes:
       - ${HV_LOG_DIR}:/logs:ro
       - ${HV_LOG_DIR}/panel:/logs/panel     # 唯一可写的日志目录：审计日志 panel.log
       - ./state:/state                       # 读状态文件；只写 state/requests/
+      - ca_public:/ca:ro                     # 只含本地 CA 根证书 root.crt（见下方 caddy 片段）
     networks: [frontend, dockerapi]
-    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "/panel", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+    logging: *logging
+
+  caddy:
+    # …（其余配置见 compose.yaml）…
+    volumes:
+      - ca_public:/ca-public
+    healthcheck:
+      # 健康检查顺带把本地 CA 根证书（公开部分）复制到 ca_public 卷；域名模式删除副本。
+      # 面板绝不挂载含 root.key 的 caddy 数据卷。
+      test:
+        - CMD-SHELL
+        - >-
+          s=/data/caddy/pki/authorities/local/root.crt; d=/ca-public/root.crt;
+          if [ "$$HV_TLS_SNIPPET" = internal ] && [ -s "$$s" ]; then
+          cmp -s "$$s" "$$d" || { cp "$$s" "$$d.tmp" && chmod 0644 "$$d.tmp" && mv -f "$$d.tmp" "$$d"; };
+          else rm -f "$$d"; fi >/dev/null 2>&1;
+          nc -z -w 3 127.0.0.1 "$$HV_HTTPS_PORT"
+      interval: 30s
+      start_period: 1m
+      start_interval: 2s
+
+volumes:
+  ca_public:
 
 networks:
   dockerapi:
@@ -98,7 +133,7 @@ networks:
   `frontend` 子网 = `HV_FRONTEND_SUBNET`，已在 Nextcloud 的 `TRUSTED_PROXIES` 中 → Nextcloud 接受面板转发的
   `X-Forwarded-For`（真实客户端 IP 进入 Nextcloud 的防暴力破解和审计日志）。
 - 不要发布（`ports:`）panel 或 socket-proxy 的任何端口。
-- 面板不需要 caddy 数据卷（见 §5 根证书）。
+- 面板**不**挂载 caddy 数据卷（那里有 CA 私钥）；根证书经 `ca_public` 卷提供（§4.5、§9）。
 - 面板不属于任何 profile；Windows 与 Linux 都启用。
 
 ### compose.storage.yaml（两个 CLI 生成，已约定）
@@ -224,12 +259,13 @@ https://{$HV_HOST}:{$HV_PANEL_PORT} {
 ### 4.5 其它文件
 | 路径 | 用途 | 写入方 |
 |---|---|---|
-| `state/ca.crt` | `/ca.crt` 下载的根证书（**只放 root.crt**，0644）。IP 模式（`HV_TLS_MODE=internal`）时每次 install/up/maintenance 从 caddy 容器复制 `/data/caddy/pki/authorities/local/root.crt`；域名模式请删除该文件 | Linux/Windows CLI |
+| `/ca/root.crt`（`ca_public` 卷） | `/ca.crt` 下载的根证书。compose 中 caddy 的健康检查在 IP 模式（`HV_TLS_SNIPPET=internal`）下把 `/data/caddy/pki/authorities/local/root.crt` 复制到该卷（0644），域名模式删除它 | caddy 健康检查（compose.yaml） |
+| `state/ca.crt` | 仅当 `CA_CERT_FILE` 未设置且 `/ca/root.crt` 不存在时使用的兜底来源（只放 root.crt，0644） | 可选 |
 | `state/app/homevault.apk` | `/download/android` 提供的安卓安装包 | `hv android fetch` / `hv.ps1 android fetch` |
 | `state/last-backup-ok` | 上次成功备份时间（ISO 文本，可选） | 备份 |
 | `/config/storage.conf` | 扩展存储名称/路径/读写/备份（compose.storage.yaml 挂载） | `storage apply` |
 
-面板对 `ca.crt` 只输出其中的 `CERTIFICATE` 块（即使文件里误混入私钥也不会被下载）。
+面板对根证书文件只输出其中的 `CERTIFICATE` 块（即使文件里误混入私钥也不会被下载）。
 
 ---------------------------------------------------------------------------------------------------
 ## 5. 面板 → 主机：请求文件（`state/requests/`）
@@ -243,7 +279,8 @@ state/requests/20260926T101500123Z-log-retention.json      (0640，临时文件 
 ```
 - 文件名 = `<id>.json`，`id` = `<UTC 时间 YYYYMMDDTHHMMSSmmmZ>-<type>`，按字典序 = 时间顺序。
 - 允许的 `type`（主机也必须只执行这些）：`backup`、`log-clean`、`log-retention`（仅此类型带整数 `days`，1–365）。
-- 面板对 `backup`、`log-clean` 去重（已有同类待处理请求时不再新建）；待处理超过 20 个时拒绝新请求。
+- 面板对 `backup`、`log-clean` 去重（已有同类**待处理或正在执行**（已移入 `done/`、尚无结果、不超过 6 小时）的请求时不再新建，
+  返回 `duplicate:true`）；待处理超过 20 个时拒绝新请求。
 - 忽略以 `.` 开头的文件（写入中的临时文件）。
 
 **主机结果**（Linux `hv requests process` 已按此实现；Windows 请保持一致）：
@@ -275,15 +312,16 @@ state/requests/20260926T101500123Z-log-retention.json      (0640，临时文件 
 | `STATE_DIR` | `/state` | 状态/请求目录 |
 | `STAT_DIR` | `/stat` | 磁盘统计挂载根 |
 | `STORAGE_CONF` | `/config/storage.conf,/state/storage.conf` | 取第一个存在的 |
-| `CA_CERT_FILE` | `/state/ca.crt` | `/ca.crt` 的来源 |
+| `CA_CERT_FILE` | 依次尝试 `/ca/root.crt`、`/state/ca.crt` | `/ca.crt` 的来源（compose 设为 `/ca/root.crt`） |
 | `APK_FILE` | `/state/app/homevault.apk` | `/download/android` 的来源 |
 | `SESSION_TTL` | `12h` | 会话有效期（1m–168h） |
 | `ADMIN_RECHECK` | `5m` | 重新核对应用密码有效且仍是管理员的间隔 |
 | `PANEL_TRUSTED_PROXIES` | `HV_FRONTEND_SUBNET`，再缺省 `172.31.250.0/24` | 信任其 `X-Forwarded-For` 的代理网段（逗号/空格分隔） |
-| `HV_LOG_RETENTION_DAYS` | `7` | 日志保留天数的缺省值（1–365；status.json 有值时以其为准） |
+| `HV_LOG_RETENTION_DAYS` | `7` | 日志保留天数的缺省值（1–365；status.json 有值时以其为准；无效值只记录警告并按 7 处理，不会让面板无法启动） |
 | `HV_VERSION` | 空 | HomeVault 版本（status.json 有 `version` 时以其为准） |
 | `PANEL_RESTART_ALLOW` | 全部 | 只能**缩小**重启白名单（`app,cron,redis,db,caddy,wg-easy,ddns-go`） |
 | `TZ` | UTC | 时区（镜像内置时区数据库） |
+| `HTTP_PROXY` / `HTTPS_PROXY` | — | **被忽略**：Docker Compose 会把客户端 `~/.docker/config.json` 的 `proxies` 注入每个容器；面板访问 `app:80` 与 `socket-proxy` 始终直连（否则应用密码会以明文发给代理） |
 
 ---------------------------------------------------------------------------------------------------
 ## 7. 挂载与权限
@@ -295,6 +333,7 @@ state/requests/20260926T101500123Z-log-retention.json      (0640，临时文件 
 | `/state` | `./state` | rw | 目录可被 65532 遍历（0755）；状态文件 0644；`state/requests` 属主 65532、0750 |
 | `/config/storage.conf` | `storage.conf` | ro | 0644 |
 | `/stat/...` | 见 §2 | ro | 只需挂载点存在 |
+| `/ca` | 命名卷 `ca_public`（caddy 以 `/ca-public` 写入） | ro | `root.crt` 0644（由 caddy 健康检查写入） |
 
 Windows（Docker Desktop）bind mount 没有 uid 限制；`.env` 里的 Windows 路径建议使用正斜杠（`D:/HomeVault/logs`），
 并确保 `HV_LOG_DIR\panel` 与 `state\requests` 目录在 `up` 前存在。
@@ -337,11 +376,12 @@ Windows（Docker Desktop）bind mount 没有 uid 限制；`.env` 里的 Windows 
 | `GET /api/settings/log-retention` | `{"days","min":1,"max":365,"default":7,"pending","recent"}` |
 | `POST /api/settings/log-retention` | `{"days":N}`（JSON 整数 1–365）→ 写 `log-retention` 请求 |
 | `GET /api/vpn` | 设备名、地址、在线、最近握手、收发流量（无密钥） |
-| `POST /api/services/{name}/restart` | 白名单：`app, cron, redis, db, caddy, wg-easy, ddns-go` |
+| `POST /api/services/{name}/restart` | 白名单：`app, cron, redis, db, caddy, wg-easy, ddns-go`（同步重启，200）；`caddy` 例外：本请求本身经过 Caddy，面板先返回 202 再在后台重启 |
 | `GET /api/requests` | 待处理与已完成的请求 |
 | `GET /api/about` | 版本、平台、会话信息、APK/根证书可用性与根证书 SHA-256 指纹 |
 
-错误统一为 `{"error":"中文说明"}` + 相应 HTTP 状态码（401 未登录/失效，403 CSRF/跨站/非管理员，429 限速带 `Retry-After`）。
+错误统一为 `{"error":"中文说明"}` + 相应 HTTP 状态码（401 未登录/失效，403 CSRF/跨站/非管理员/面板无权读取的日志文件，
+429 限速带 `Retry-After`（也用于 Nextcloud 防暴力破解限制），503 Nextcloud 维护模式）。
 
 ---------------------------------------------------------------------------------------------------
 ## 9. 登录与安全模型
@@ -357,16 +397,18 @@ Windows（Docker Desktop）bind mount 没有 uid 限制；`.env` 里的 Windows 
   `window.open`，被拦截时退回同窗口跳转，返回键回到面板后继续）。
 - **备用方式**：“用户名 + 应用密码”（Nextcloud → 个人设置 → 安全 → 创建新应用密码）。这种密码由用户自己管理，退出时**不会**被吊销。
 - **会话**：仅内存；Cookie `__Host-hvpanel`（HttpOnly、Secure、SameSite=Strict、Path=/，12 小时）；服务端只保存 SHA-256 后的 ID；
-  最多 100 个会话。应用密码只在内存中用于 OCS 调用；退出、过期、面板停止（SIGTERM）时吊销 Login Flow 创建的设备密码。
+  最多 100 个会话。应用密码只在内存中用于 OCS 调用；退出、过期、面板停止（SIGTERM）时吊销 Login Flow 创建的设备密码
+  （停止时与关闭 HTTP 连接并行进行，8 秒内完成，赶在 Compose 默认 10 秒的强制结束之前；慢速下载不会拖住吊销）。
   每 5 分钟核对一次：应用密码被删除或用户被移出 admin 组 → 会话立即失效。
 - **CSRF**：所有非 GET 请求需 `X-CSRF-Token`，并经 Go `http.CrossOriginProtection`（`Sec-Fetch-Site`/`Origin`）拒绝跨站请求。
-- **限速**：开始 Login Flow 每 IP 10 次/10 分钟；应用密码登录失败每 IP 5 次/15 分钟、全局 30 次/15 分钟；同时等待中的 Flow ≤ 50。
+- **限速**：开始 Login Flow 每 IP 10 次/10 分钟（同一浏览器重新开始会取消它之前的 Flow）；应用密码登录失败每 IP 5 次/15 分钟、
+  全局 30 次/15 分钟——名额在询问 Nextcloud **之前**预留，并发请求无法绕过，成功登录归还名额；同时等待中的 Flow ≤ 50。
   面板把真实客户端 IP 通过 `X-Forwarded-For` 交给 Nextcloud，Nextcloud 自身的防暴力破解按真实 IP 生效。
 - **Docker**：面板容器没有 docker.sock；socket-proxy 只放行只读接口与 restart。注意 linuxserver/socket-proxy 的
   `ALLOW_RESTARTS=1` 同时放行 `stop`/`kill`（同一正则）——因此 `dockerapi` 必须是只连接 panel 与 socket-proxy 的 `internal` 网络；
   面板代码只调用 `restart`，且只对白名单服务、本 compose 项目（标签过滤）中的容器。
 - **根证书**：没有把 caddy 数据卷挂进面板——Caddy 以 0600/0700（root）保存 `pki/`，uid 65532 本来就读不到，而且那里有 CA 私钥。
-  改为由主机把 `root.crt` 复制到 `state/ca.crt`（§4.5）。
+  改为由 caddy 的健康检查把 `root.crt`（公开部分）复制到只含这一个文件的 `ca_public` 卷，面板只读挂载到 `/ca`（§2、§4.5）。
 
 ---------------------------------------------------------------------------------------------------
 ## 10. 测试
@@ -379,12 +421,12 @@ SMOKE_PROJECT=hvpanel SMOKE_NC_PORT=19443 SMOKE_PANEL_PORT=19444 SMOKE_SUBNET=17
 ```
 冒烟测试覆盖：socket-proxy 放行/拒绝矩阵；真实 Nextcloud 34 Login Flow v2（管理员成功、普通用户被拒且设备密码被吊销）；
 应用密码登录与限速；全部 API（使用本文 §4 规范格式的示例状态文件）；请求文件格式与权限；主机结果文件合并；
-经 socket-proxy 重启 redis；`/ca.crt` 只含证书；`/download/android`；跨站/缺 CSRF 的 POST 被拒；审计日志；
+经 socket-proxy 重启 redis；`/ca.crt` 来自 caddy 健康检查复制到 `ca_public` 卷的根证书（与 compose.yaml 相同的机制）且不含私钥；`/download/android`；跨站/缺 CSRF 的 POST 被拒；审计日志；
 退出登录与优雅停机时吊销设备密码；可选的 Playwright 手机/深色/桌面页面截图与 CSP 报错检查。
 
 ---------------------------------------------------------------------------------------------------
 ## 11. 与 SPEC §15 的差异
 
-1. `/ca.crt` 的来源是 `state/ca.crt`（主机复制），而不是把 caddy 数据卷只读挂进面板（原因见 §9，已实测 Caddy 的 pki 文件为 root 0600）。
+1. `/ca.crt` 的来源是 `ca_public` 卷（caddy 健康检查复制的 `root.crt`），而不是把 caddy 数据卷只读挂进面板（原因见 §9，已实测 Caddy 的 pki 文件为 root 0600，且含 CA 私钥）。
 2. 面板写请求文件时带 `id`、`created`、`requested_by`、`client_ip`、`source` 字段；主机只需读取 `type` 与 `days`。
 3. `status.json` 增加可选 `disks`（无 `/stat` 挂载时的兜底），`backup-status.json` 增加可选 `exit_code`。

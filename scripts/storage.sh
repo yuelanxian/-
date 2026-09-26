@@ -102,9 +102,19 @@ _st_bind() {
 	printf '        bind:\n          create_host_path: false\n'
 }
 
-# storage_render_compose <with_backup:0|1> <with_panel:0|1> → YAML on stdout (empty when nothing to add)
+# _st_panel_bind source target check_exists — panel stat mounts are skipped when the source is missing
+# (an unplugged backup disk must not prevent the panel from starting; it then shows the disk as missing)
+_st_panel_bind() {
+	if [[ $3 == 1 ]]; then
+		[[ -e $1 ]] || return 0
+	fi
+	_st_bind "$1" "$2" true
+}
+
+# storage_render_compose <with_backup:0|1> <with_panel:0|1> [check_exists:1|0] → YAML on stdout (empty when nothing to add)
+# Panel mounts (SPEC §15): /config/storage.conf, /stat/data, /stat/backup (local target), /stat/storage/<slug>, all read-only.
 storage_render_compose() {
-	local with_backup=${1:-1} with_panel=${2:-0} i svc ro any_backup=0 out
+	local with_backup=${1:-1} with_panel=${2:-0} chk=${3:-1} i svc ro any_backup=0 out panel
 	out=$(
 		if ((${#ST_NAME[@]})); then
 			for svc in app cron; do
@@ -128,15 +138,19 @@ storage_render_compose() {
 			fi
 		fi
 		if ((with_panel)); then
-			printf '  panel:\n    volumes:\n'
-			[[ -f $HV_STORAGE_CONF ]] && _st_bind "$HV_STORAGE_CONF" /config/storage.conf true
-			[[ -n ${HV_NC_DATA_PATH:-} ]] && _st_bind "$HV_NC_DATA_PATH" /stat/data true
-			if [[ ${HV_BACKUP_TARGET:-local} == local && -n ${HV_BACKUP_LOCAL_PATH:-} ]]; then
-				_st_bind "$HV_BACKUP_LOCAL_PATH" /stat/backup true
+			panel=$(
+				[[ -f $HV_STORAGE_CONF ]] && _st_bind "$HV_STORAGE_CONF" /config/storage.conf true
+				[[ -n ${HV_NC_DATA_PATH:-} ]] && _st_panel_bind "$HV_NC_DATA_PATH" /stat/data "$chk"
+				if [[ ${HV_BACKUP_TARGET:-local} == local && -n ${HV_BACKUP_LOCAL_PATH:-} ]]; then
+					_st_panel_bind "$HV_BACKUP_LOCAL_PATH" /stat/backup "$chk"
+				fi
+				for i in "${!ST_NAME[@]}"; do
+					_st_panel_bind "${ST_PATH[i]}" "/stat/storage/${ST_SLUG[i]}" "$chk"
+				done
+			)
+			if [[ -n $panel ]]; then
+				printf '  panel:\n    volumes:\n%s\n' "$panel"
 			fi
-			for i in "${!ST_NAME[@]}"; do
-				_st_bind "${ST_PATH[i]}" "/stat/storage/${ST_SLUG[i]}" true
-			done
 		fi
 	)
 	[[ -n $out ]] || return 0

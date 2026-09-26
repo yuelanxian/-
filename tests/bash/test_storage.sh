@@ -58,7 +58,7 @@ test_storage_render_compose() {
 	HV_STORAGE_CONF=$FIXTURES/storage-valid.conf
 	storage_parse_conf "$FIXTURES/storage-valid.conf"
 	local y
-	y=$(storage_render_compose 1 1)
+	y=$(storage_render_compose 1 1 0)
 	assert_contains "$y" 'target: "/mnt/hv/s24d68919"'
 	assert_contains "$y" 'source: "/mnt/media/影视 资料"'
 	assert_contains "$y" 'source: "/mnt/a \"quoted\"/$$HOME"'
@@ -68,6 +68,8 @@ test_storage_render_compose() {
 	assert_contains "$y" 'target: "/stat/backup"'
 	assert_contains "$y" 'target: "/config/storage.conf"'
 	assert_contains "$y" 'create_host_path: false'
+	assert_contains "$y" 'target: "/stat/data"'
+	assert_contains "$y" 'target: "/stat/storage/s24d68919"'
 	# no storage + no panel → nothing
 	ST_NAME=() ST_PATH=() ST_MODE=() ST_BACKUP=() ST_USERS=() ST_SLUG=()
 	assert_eq '' "$(storage_render_compose 1 0)"
@@ -83,7 +85,7 @@ test_storage_render_validates_with_compose() {
 	mkdir -p "$d"
 	cp "$FIXTURES/compose-minimal.yaml" "$d/compose.yaml"
 	printf 'HV_NC_DATA_PATH=/srv/hv/nextcloud-data\nHV_DUMP_DIR=/srv/hv/dumps\n' >"$d/.env"
-	storage_render_compose 1 1 >"$d/compose.storage.yaml"
+	storage_render_compose 1 1 0 >"$d/compose.storage.yaml"
 	out=$(docker compose --project-directory "$d" -f "$d/compose.yaml" -f "$d/compose.storage.yaml" --env-file "$d/.env" -p t config 2>&1) ||
 		fail "compose config rejected the rendered file: $out"
 	assert_contains "$out" 'target: /mnt/hv/s24d68919'
@@ -94,6 +96,28 @@ test_storage_render_validates_with_compose() {
 	assert_eq True "$(json_get "any(v['target']=='/mnt/hv/$(storage_slug '/mnt/media/影视 资料')' and v.get('read_only') for v in d['services']['app']['volumes'])" <<<"$out")" "ro mount"
 	assert_eq True "$(json_get "any(v['target']=='/mnt/hv/s24d68919' and not v.get('read_only') for v in d['services']['cron']['volumes'])" <<<"$out")" "rw mount"
 	assert_eq True "$(json_get "any(v['source']=='/mnt/a \"quoted\"/\$\$HOME' for v in d['services']['app']['volumes'])" <<<"$out")" "quoted path with literal \$"
+}
+
+test_storage_render_panel_skips_missing_sources() {
+	HV_PLATFORM=linux HV_BACKUP_TARGET=local
+	local d=$TMP_ROOT/pstat y
+	mkdir -p "$d/data" "$d/photos"
+	HV_NC_DATA_PATH=$d/data HV_BACKUP_LOCAL_PATH=$d/usb-not-plugged
+	HV_STORAGE_CONF=$d/storage.conf
+	printf '照片|%s|rw|yes|\n缺失|%s|ro|no|\n' "$d/photos" "$d/missing" >"$HV_STORAGE_CONF"
+	storage_parse_conf "$HV_STORAGE_CONF"
+	y=$(storage_render_compose 1 1)
+	assert_contains "$y" 'target: "/stat/data"'
+	assert_contains "$y" "target: \"/stat/storage/$(storage_slug "$d/photos")\""
+	assert_not_contains "$y" '/stat/backup' "missing backup target not mounted into the panel"
+	assert_not_contains "$y" "/stat/storage/$(storage_slug "$d/missing")"
+	assert_contains "$y" "target: \"/mnt/hv/$(storage_slug "$d/missing")\"" "app/cron keep every configured storage"
+	# panel only (no storages, nothing exists) → no empty "volumes:" key
+	ST_NAME=() ST_PATH=() ST_MODE=() ST_BACKUP=() ST_USERS=() ST_SLUG=()
+	HV_NC_DATA_PATH=$d/nope HV_STORAGE_CONF=$d/none.conf
+	assert_eq '' "$(storage_render_compose 1 1)"
+	# slug vector shared with Windows (SPEC: 'D:\Photos' → sea173462)
+	assert_eq sea173462 "$(storage_slug 'D:\Photos')"
 }
 
 test_storage_render_file_changes() {

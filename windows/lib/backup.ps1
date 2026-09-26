@@ -70,6 +70,110 @@ function Get-HvBackupAgeHours {
     return (($Now.ToUniversalTime() - $dt.ToUniversalTime()).TotalHours)
 }
 
+function Get-HvNextDailyRun {
+    # Pure: next local occurrence of "HH:MM" strictly after Now ($null when the time is invalid).
+    param([string]$Time, [datetime]$Now)
+    if ($Time -notmatch '^\s*(\d{1,2}):(\d{2})\s*$') { return $null }
+    $h = [int]$Matches[1]; $m = [int]$Matches[2]
+    if ($h -gt 23 -or $m -gt 59) { return $null }
+    $c = $Now.Date.AddHours($h).AddMinutes($m)
+    if ($c -le $Now) { $c = $c.AddDays(1) }
+    return $c
+}
+
+function ConvertFrom-HvResticTime {
+    # Pure: restic/Go timestamp (up to 9 fractional digits) or DateTime (PS 7's ConvertFrom-Json) -> UTC DateTime; $null if invalid.
+    param([AllowNull()]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    $t = [regex]::Replace(([string]$Value).Trim(), '(\.\d{7})\d+', '$1')
+    $dto = [System.DateTimeOffset]::MinValue
+    if ([System.DateTimeOffset]::TryParse($t, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$dto)) { return $dto.UtcDateTime }
+    return $null
+}
+
+function Get-HvLatestSnapshotStats {
+    # Pure: canonical BackupStats from the newest snapshot's summary in `restic snapshots --json` output
+    # (restic >= 0.17). $null when there is none, or when it is older than -NotBefore (this run made no snapshot).
+    param([AllowEmptyString()][string]$Json, $NotBefore = $null)
+    $t = ([string]$Json).Trim()
+    if (-not $t.StartsWith('[')) { return $null }
+    $best = $null; $bestTime = $null
+    foreach ($snap in (ConvertFrom-Json -InputObject $t)) {
+        if ($null -eq $snap) { continue }
+        $tm = ConvertFrom-HvResticTime (Get-HvPropValue $snap 'time')
+        if ($null -eq $tm) { continue }
+        if ($null -eq $bestTime -or $tm -gt $bestTime) { $best = $snap; $bestTime = $tm }
+    }
+    if ($null -eq $best) { return $null }
+    if ($null -ne $NotBefore -and $bestTime -lt ([datetime]$NotBefore).ToUniversalTime()) { return $null }
+    $sum = Get-HvPropValue $best 'summary'
+    if ($null -eq $sum) { return $null }
+    $st = [ordered]@{}
+    foreach ($k in @('files_new', 'files_changed', 'data_added', 'total_files_processed', 'total_bytes_processed')) {
+        $v = Get-HvPropValue $sum $k 0
+        $n = [int64]0
+        [void][int64]::TryParse([string]$v, [ref]$n)
+        $st[$k] = $n
+    }
+    return $st
+}
+
+function Get-HvRepositoryDisplay {
+    # Pure: repository shown in the panel - local path or S3 URL without any user:password@ part.
+    param([System.Collections.IDictionary]$Env)
+    $t = Get-HvEnvDictValue $Env 'HV_BACKUP_TARGET'
+    if ($t -eq 's3') { return ([string](Get-HvEnvDictValue $Env 'HV_BACKUP_S3_REPO') -replace '://[^/@]*@', '://') }
+    if ($t -eq 'local') { return (Get-HvEnvDictValue $Env 'HV_BACKUP_LOCAL_PATH') }
+    return ''
+}
+
+function New-HvBackupStatus {
+    # Pure: state/backup-status.json in the canonical shape (panel/internal/hoststate/types.go BackupStatus).
+    param(
+        [System.Collections.IDictionary]$Env, [string]$State, [datetime]$Started, [datetime]$Now,
+        $Finished = $null, [AllowEmptyString()][string]$LastSuccess = '', [AllowEmptyString()][string]$Message = '',
+        [AllowEmptyString()][string]$LogFile = '', $NextRun = $null, $ExitCode = $null, $Stats = $null
+    )
+    $o = [ordered]@{}
+    $o['updated'] = Format-HvIsoTime $Now
+    $o['state'] = $State
+    $o['last_run'] = Format-HvIsoTime $Started
+    if ($null -ne $Finished) {
+        $o['last_finished'] = Format-HvIsoTime ([datetime]$Finished)
+        $o['duration_seconds'] = [Math]::Round((([datetime]$Finished) - $Started).TotalSeconds, 1)
+    } else {
+        $o['last_finished'] = $null
+        $o['duration_seconds'] = 0
+    }
+    if ($LastSuccess) { $o['last_success'] = $LastSuccess } else { $o['last_success'] = $null }
+    $o['message'] = $Message
+    $o['log_file'] = $LogFile
+    $o['target'] = Get-HvEnvDictValue $Env 'HV_BACKUP_TARGET'
+    $o['repository'] = Get-HvRepositoryDisplay $Env
+    $o['schedule'] = Get-HvEnvDictValue $Env 'HV_BACKUP_TIME' '03:30'
+    if ($null -ne $NextRun) { $o['next_run'] = Format-HvIsoTime ([datetime]$NextRun) }
+    if ($null -ne $ExitCode) { $o['exit_code'] = [int]$ExitCode }
+    if ($null -ne $Stats) { $o['stats'] = $Stats }
+    return $o
+}
+
+function Get-HvPathRelativeTo {
+    # Pure: File relative to Dir with '/' separators ('' when File is not below Dir; case-insensitive like NTFS).
+    param([AllowEmptyString()][string]$Dir, [AllowEmptyString()][string]$File)
+    if (-not $Dir -or -not $File) { return '' }
+    $d = ($Dir -replace '\\', '/').TrimEnd('/') + '/'
+    $f = ($File -replace '\\', '/')
+    if (-not $f.StartsWith($d, [System.StringComparison]::OrdinalIgnoreCase)) { return '' }
+    return $f.Substring($d.Length)
+}
+
+function Get-HvBackupLogRelPath {
+    # Pure: log path relative to HV_LOG_DIR (what the panel links to).
+    param([datetime]$Started)
+    return ('backup/backup-' + $Started.ToString('yyyyMMdd-HHmmss', [System.Globalization.CultureInfo]::InvariantCulture) + '.log')
+}
+
 # ---------------------------------------------------------------- runtime helpers
 
 function Invoke-HvRestic {
@@ -115,6 +219,24 @@ function Initialize-HvResticRepo {
     Stop-Hv ('无法访问备份仓库（restic 退出码 ' + $code + '）。') $code
 }
 
+function Test-HvDumpComplete {
+    # pg_dump plain SQL ends with "-- PostgreSQL database dump complete" (checks the last 4 KB only).
+    param([string]$Path)
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $n = [int][Math]::Min([int64]4096, $fs.Length)
+        [void]$fs.Seek(-$n, [System.IO.SeekOrigin]::End)
+        $buf = New-Object byte[] $n
+        $read = 0
+        while ($read -lt $n) {
+            $k = $fs.Read($buf, $read, $n - $read)
+            if ($k -le 0) { break }
+            $read += $k
+        }
+    } finally { $fs.Dispose() }
+    return ([System.Text.Encoding]::UTF8.GetString($buf, 0, $read)).Contains('PostgreSQL database dump complete')
+}
+
 function Invoke-HvDbDump {
     # pg_dump (plain SQL) into HV_DUMP_DIR\nextcloud.sql via a temp file.
     param([System.Collections.IDictionary]$Env)
@@ -123,28 +245,25 @@ function Invoke-HvDbDump {
     [void](New-HvDirectory $dir)
     $final = Join-HvPath $dir 'nextcloud.sql'
     $tmp = $final + '.tmp'
-    $a = @(Get-HvComposeArgs) + @('exec', '-T', 'db', 'pg_dump', '-U', 'nextcloud', '-d', 'nextcloud', '--no-owner')
+    # owners are kept (tables belong to Nextcloud's own role, e.g. oc_hvadmin; restore --full recreates it first)
+    $a = @(Get-HvComposeArgs) + @('exec', '-T', 'db', 'pg_dump', '-U', 'nextcloud', '-d', 'nextcloud', '--no-password')
     $code = Invoke-HvNativeToFile -FilePath 'docker' -ArgumentList $a -OutFile $tmp
     $len = 0
     if ([System.IO.File]::Exists($tmp)) { $len = (New-Object System.IO.FileInfo($tmp)).Length }
-    if ($code -ne 0 -or $len -lt 100) {
+    if ($code -ne 0 -or $len -lt 100 -or -not (Test-HvDumpComplete $tmp)) {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-        Stop-Hv ('pg_dump 失败（退出码 ' + $code + '）。')
+        Stop-Hv ('pg_dump 失败或导出不完整（退出码 ' + $code + '）。')
     }
     if ([System.IO.File]::Exists($final)) { Remove-Item -LiteralPath $final -Force }
     Move-Item -LiteralPath $tmp -Destination $final
     Write-HvOk ('数据库已导出：' + $final + '（' + (ConvertTo-HvSizeText $len) + '）')
 }
 
-function Invoke-HvBackup {
-    param([switch]$Init, [switch]$Check)
-    $envv = Assert-HvBackupConfigured
-    Update-HvDerivedEnv
-    $envv = Get-HvEnv
-    Write-HvStep ('HomeVault 备份开始：' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
-    Initialize-HvResticRepo -Env $envv -AllowInit:$Init
+function Invoke-HvBackupCore {
+    # (repository already opened) maintenance mode only around pg_dump -> restic backup -> forget --prune -> check (Sundays / --check).
+    param([System.Collections.IDictionary]$Env, [switch]$Check)
+    $envv = $Env
     if (-not (Test-HvAppRunning)) { Stop-Hv 'Nextcloud 未运行：请先启动（.\windows\hv.ps1 up）再备份。' }
-    [void](Write-HvComposeStorageFile)
     $maintOn = $false
     try {
         Write-HvInfo '开启维护模式（仅在导出数据库期间）...'
@@ -154,6 +273,10 @@ function Invoke-HvBackup {
     } finally {
         if ($maintOn) {
             $off = Invoke-HvOcc -OccArgs @('maintenance:mode', '--off') -Capture -AllowFailure
+            if ($off.ExitCode -ne 0) {
+                Start-Sleep -Seconds 3
+                $off = Invoke-HvOcc -OccArgs @('maintenance:mode', '--off') -Capture -AllowFailure
+            }
             if ($off.ExitCode -ne 0) { Write-HvErr '关闭维护模式失败！请手动运行：.\windows\hv.ps1 occ maintenance:mode --off' } else { Write-HvInfo '已关闭维护模式。' }
         }
     }
@@ -172,11 +295,131 @@ function Invoke-HvBackup {
         $c = Invoke-HvRestic -ResticArgs (Get-HvResticCheckArgs $envv) -Tee -AllowFailure
         if ($c.ExitCode -ne 0) { Stop-Hv ('restic check 失败（退出码 ' + $c.ExitCode + '）：备份仓库可能损坏！') $c.ExitCode }
     }
-    if ($partial) { Stop-Hv '备份不完整（restic 退出码 3），请查看上面的警告。' 3 }
+    if ($partial) { Stop-Hv '备份不完整（restic 退出码 3：部分文件无法读取），请查看备份日志中的警告。' 3 }
     if ($f.ExitCode -ne 0) { Stop-Hv '备份已完成，但清理旧快照失败。' $f.ExitCode }
-    $state = New-HvDirectory (Get-HvPath 'state')
-    Write-HvTextFile -Path (Join-HvPath $state 'last-backup-ok') -Content ((Get-Date).ToString('o') + "`n")
-    Write-HvOk ('备份成功：' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+}
+
+function Get-HvBackupStatePath { param([string]$Name) return (Join-HvPath (New-HvDirectory (Get-HvPath 'state')) $Name) }
+
+function Get-HvLastBackupOk {
+    $f = Get-HvBackupStatePath 'last-backup-ok'
+    if (-not [System.IO.File]::Exists($f)) { return '' }
+    return (Read-HvTextFile $f).Trim()
+}
+
+function Get-HvBackupNextRun {
+    # Next run of the HomeVault-Backup task ($null when it is not scheduled).
+    if (-not (Test-HvWindows)) { return $null }
+    try {
+        $t = Get-ScheduledTask -TaskName $script:HvBackupTask -ErrorAction Stop
+        if ([string]$t.State -eq 'Disabled') { return $null }
+        $i = $t | Get-ScheduledTaskInfo -ErrorAction Stop
+        if ($i.NextRunTime) { return [datetime]$i.NextRunTime }
+        return (Get-HvNextDailyRun -Time (Get-HvEnvValue 'HV_BACKUP_TIME' '03:30') -Now (Get-Date))
+    } catch { return $null }
+}
+
+function Save-HvSnapshotsJson {
+    # state\snapshots.json = raw `restic snapshots --json` (byte-exact); returns the JSON text ('' on failure).
+    param([System.Collections.IDictionary]$Env)
+    $final = Get-HvBackupStatePath 'snapshots.json'
+    $tmp = Join-HvPath ([System.IO.Path]::GetDirectoryName($final)) ('.snapshots.json.' + $PID + '.tmp')
+    $text = ''
+    try {
+        $a = @(Get-HvComposeArgs -Tools) + @('run', '--rm', '--no-deps', '-T', 'backup') + @(Get-HvResticRepoArgs $Env) +
+            @('snapshots', '--json', '--host', 'homevault', '--tag', 'homevault')
+        $code = Invoke-HvNativeToFile -FilePath 'docker' -ArgumentList $a -OutFile $tmp
+        if ([System.IO.File]::Exists($tmp)) { $text = Read-HvTextFile $tmp }
+        if ($code -ne 0 -or -not $text.Trim().StartsWith('[')) { throw ('restic snapshots 退出码 ' + $code) }
+        Move-HvFileReplace -Source $tmp -Destination $final
+        return $text
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Write-HvWarn ('未能更新快照列表 state\snapshots.json：' + (Get-HvErrorMessage $_))
+        return ''
+    }
+}
+
+function Save-HvBackupStatus {
+    param([System.Collections.IDictionary]$Status)
+    try { Write-HvJsonFile -Path (Get-HvBackupStatePath 'backup-status.json') -Value $Status } catch { Write-HvWarn ('无法写入 state\backup-status.json：' + $_.Exception.Message) }
+}
+
+function Enter-HvBackupLock {
+    # Exclusive lock so a scheduled backup and a panel request never run restic at the same time.
+    $f = Get-HvBackupStatePath 'backup.lock'
+    try {
+        return [System.IO.File]::Open($f, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    } catch {
+        Stop-Hv '另一个备份任务正在运行（state\backup.lock 被占用），请稍后再试。' 11
+    }
+}
+
+function Invoke-HvBackup {
+    # Full backup job (CLI, scheduled task, panel request): own log file HV_LOG_DIR\backup\backup-<time>.log, lock,
+    # state\backup-status.json (running -> ok | partial | failed), state\snapshots.json, state\last-backup-ok.
+    param([switch]$Init, [switch]$Check, [string]$LogFile = '')
+    $envv = Get-HvEnv
+    $t = Get-HvEnvDictValue $envv 'HV_BACKUP_TARGET'
+    if ($t -ne 'local' -and $t -ne 's3') { [void](Assert-HvBackupConfigured) }
+    Update-HvDerivedEnv
+    $envv = Get-HvEnv
+    $started = Get-Date
+    $logDir = Get-HvEnvLogDir
+    if (-not $LogFile -and $logDir) {
+        $LogFile = Join-HvPath (Join-HvPath $logDir 'backup') ([System.IO.Path]::GetFileName((Get-HvBackupLogRelPath $started)))
+    }
+    # the panel links to log_file relative to HV_LOG_DIR (also for --log paths chosen by the request runner)
+    $logRel = Get-HvPathRelativeTo -Dir $logDir -File $LogFile
+    $prevLog = $script:HvLogFile
+    if ($LogFile) {
+        try { [void](New-HvDirectory ([System.IO.Path]::GetDirectoryName($LogFile))) } catch { }
+        Write-HvLog ('备份开始，日志：' + $LogFile)
+        $script:HvLogFile = $LogFile
+    }
+    $failure = $null
+    $lock = $null
+    try {
+        $lock = Enter-HvBackupLock
+        Save-HvBackupStatus (New-HvBackupStatus -Env $envv -State 'running' -Started $started -Now (Get-Date) -LastSuccess (Get-HvLastBackupOk) `
+                -Message '备份进行中' -LogFile $logRel -NextRun (Get-HvBackupNextRun))
+        $state = 'ok'; $code = 0; $msg = '备份成功'; $repoReady = $false
+        try {
+            Write-HvStep ('HomeVault 备份开始：' + $started.ToString('yyyy-MM-dd HH:mm:ss'))
+            [void](Assert-HvBackupConfigured)
+            [void](Write-HvComposeStorageFile)
+            Initialize-HvResticRepo -Env $envv -AllowInit:$Init
+            $repoReady = $true
+            Invoke-HvBackupCore -Env $envv -Check:$Check
+        } catch {
+            $failure = $_
+            $code = Get-HvExitCodeFromError $_
+            if ($code -eq 0) { $code = 1 }
+            $msg = Get-HvErrorMessage $_
+            $state = 'failed'
+            if ($code -eq 3) { $state = 'partial' }
+            Write-HvErr ('备份未成功：' + $msg)
+        }
+        $finished = Get-Date
+        if ($state -eq 'ok') {
+            Write-HvTextFile -Path (Get-HvBackupStatePath 'last-backup-ok') -Content ((Format-HvIsoTime $finished) + "`n")
+            Write-HvOk ('备份成功：' + $finished.ToString('yyyy-MM-dd HH:mm:ss') + '（用时 ' + [int]($finished - $started).TotalMinutes + ' 分钟）')
+        }
+        $stats = $null
+        if ($repoReady) {
+            $snap = Save-HvSnapshotsJson -Env $envv
+            if ($snap) { try { $stats = Get-HvLatestSnapshotStats -Json $snap -NotBefore $started.AddMinutes(-2) } catch { $stats = $null } }
+        }
+        Save-HvBackupStatus (New-HvBackupStatus -Env $envv -State $state -Started $started -Now (Get-Date) -Finished $finished `
+                -LastSuccess (Get-HvLastBackupOk) -Message $msg -LogFile $logRel -NextRun (Get-HvBackupNextRun) -ExitCode $code -Stats $stats)
+    } finally {
+        if ($lock) { $lock.Dispose() }
+        $script:HvLogFile = $prevLog
+    }
+    if ($null -ne $failure) {
+        if ($LogFile) { Write-HvInfo ('备份日志：' + $LogFile) }
+        throw $failure
+    }
 }
 
 function Register-HvBackupTask {
@@ -184,17 +427,16 @@ function Register-HvBackupTask {
     Assert-HvWindows 'schedule-backup'
     $at = ConvertTo-HvTaskTime $Time
     $hv = Join-HvPath (Join-HvPath (Get-HvRoot) 'windows') 'hv.ps1'
-    $log = Join-HvPath (Get-HvPath 'state') 'backup.log'
-    [void](New-HvDirectory (Get-HvPath 'state'))
-    $arg = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $hv + '" backup --non-interactive --log "' + $log + '"'
+    $log = Join-HvPath (Get-HvEnvLogDir) 'backup'
+    $arg = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $hv + '" backup --non-interactive'
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg -WorkingDirectory (Get-HvRoot)
     $trigger = New-ScheduledTaskTrigger -Daily -At $at
     $user = Get-HvDesktopUserName
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 23) -MultipleInstances IgnoreNew
     [void](Register-ScheduledTask -TaskName $script:HvBackupTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
-            -Description 'HomeVault：每日 restic 备份（Docker Desktop 需在该用户登录后运行）。日志：state\backup.log' -Force)
-    Write-HvOk ('已创建计划任务 ' + $script:HvBackupTask + '：每天 ' + $at.ToString('HH:mm') + ' 以用户 ' + $user + ' 运行（日志 ' + $log + '）。')
+            -Description ('HomeVault：每日 restic 备份（Docker Desktop 需在该用户登录后运行）。日志：' + $log) -Force)
+    Write-HvOk ('已创建计划任务 ' + $script:HvBackupTask + '：每天 ' + $at.ToString('HH:mm') + ' 以用户 ' + $user + ' 运行（日志在 ' + $log + '）。')
 }
 
 function Invoke-HvCmdScheduleBackup {
@@ -218,16 +460,16 @@ function Invoke-HvCmdScheduleBackup {
 
 function Invoke-HvCmdBackup {
     param([object[]]$Arguments = @())
-    $p = Read-HvCommandArgs -Arguments $Arguments -Switches @('init', 'check') -Options @('log')
-    $log = Get-HvOpt $p 'log' ''
-    if ($log) { $script:HvLogFile = $log; [void](New-HvDirectory ([System.IO.Path]::GetDirectoryName($log))) }
+    $p = Read-HvCommandArgs -Arguments $Arguments -Switches @('init', 'check', 'unlock', 'snapshots', 'list') -Options @('log')
     [void](Get-HvEnv)
-    try {
-        Invoke-HvBackup -Init:(Test-HvOpt $p 'init') -Check:(Test-HvOpt $p 'check')
-    } catch {
-        Write-HvLog ('备份失败：' + (Get-HvErrorMessage $_))
-        throw
+    if ((Test-HvOpt $p 'unlock') -or (Test-HvOpt $p 'snapshots') -or (Test-HvOpt $p 'list')) {
+        $envv = Assert-HvBackupConfigured
+        if (Test-HvOpt $p 'unlock') { [void](Invoke-HvRestic -ResticArgs (@(Get-HvResticRepoArgs $envv) + @('unlock')) -Tee); Write-HvOk '已清除过期的仓库锁。'; return }
+        [void](Invoke-HvRestic -ResticArgs (@(Get-HvResticRepoArgs $envv) + @('snapshots', '--host', 'homevault', '--tag', 'homevault')) -Tee)
+        [void](Save-HvSnapshotsJson -Env $envv)
+        return
     }
+    Invoke-HvBackup -Init:(Test-HvOpt $p 'init') -Check:(Test-HvOpt $p 'check') -LogFile (Get-HvOpt $p 'log' '')
 }
 
 # ---------------------------------------------------------------- restore
@@ -249,6 +491,44 @@ function New-HvRestoreOverlay {
 function Get-HvRestoreFullIncludes {
     return @('/src/nextcloud-html/config', '/src/nextcloud-html/custom_apps', '/src/nextcloud-html/themes',
         '/src/nextcloud-data', '/src/caddy-data', '/src/dumps')
+}
+
+function Test-HvSqlIdentifier {
+    param([AllowEmptyString()][string]$Name)
+    return ($Name -cmatch '^[A-Za-z0-9_]{1,63}$')
+}
+
+function New-HvRestoreDbSql {
+    # Pure: SQL (run as the postgres superuser "nextcloud" on database postgres) that (re)creates the Nextcloud
+    # role with the password from the restored config.php and an empty database owned by it (same as the bash CLI).
+    param([string]$User, [AllowEmptyString()][string]$Password, [string]$Name)
+    if (-not (Test-HvSqlIdentifier $User) -or -not (Test-HvSqlIdentifier $Name)) { throw ('config.php 中的数据库用户名/库名格式异常：' + $User + ' / ' + $Name) }
+    $q = [string][char]39
+    $l = @()
+    if ($User -ne 'nextcloud') {
+        $pw = $q + ($Password -replace $q, ($q + $q)) + $q
+        $l += ('DO $hv$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = ' + $q + $User + $q + ') THEN CREATE ROLE "' + $User + '" LOGIN PASSWORD ' + $pw +
+            '; ELSE ALTER ROLE "' + $User + '" WITH LOGIN PASSWORD ' + $pw + '; END IF; END$hv$;')
+    }
+    $l += ('DROP DATABASE IF EXISTS "' + $Name + '" WITH (FORCE);')
+    $l += ('CREATE DATABASE "' + $Name + '" OWNER "' + $User + '";')
+    return (($l -join "`n") + "`n")
+}
+
+function ConvertFrom-HvDbConfigOutput {
+    # Pure: the three lines "dbuser / dbpassword / dbname" printed by PHP -> object (throws when incomplete).
+    param([string[]]$Lines = @())
+    $x = @(@($Lines) | ForEach-Object { ([string]$_).TrimEnd("`r") })
+    if ($x.Count -lt 3 -or -not $x[$x.Count - 3] -or -not $x[$x.Count - 1]) { throw '无法从恢复的 config.php 读取数据库配置（dbuser / dbname）。' }
+    return [pscustomobject]@{ User = $x[$x.Count - 3]; Password = $x[$x.Count - 2]; Name = $x[$x.Count - 1] }
+}
+
+function Get-HvRestoredDbConfig {
+    # dbuser / dbpassword / dbname of the restored config.php (one-off app container; nothing is printed).
+    $php = 'include "/var/www/html/config/config.php"; echo ($CONFIG["dbuser"] ?? ""), PHP_EOL, ($CONFIG["dbpassword"] ?? ""), PHP_EOL, ($CONFIG["dbname"] ?? "nextcloud"), PHP_EOL;'
+    $r = Invoke-HvCompose -Arguments @('run', '--rm', '--no-deps', '-T', '--entrypoint', 'php', 'app', '-r', $php) -Capture -AllowFailure
+    if ($r.ExitCode -ne 0) { Stop-Hv ('无法从恢复的 config.php 读取数据库配置（退出码 ' + $r.ExitCode + '）。') }
+    try { return (ConvertFrom-HvDbConfigOutput -Lines $r.Output) } catch { Stop-Hv $_.Exception.Message }
 }
 
 function Invoke-HvRestoreFiles {
@@ -282,25 +562,20 @@ function Invoke-HvRestoreFull {
         if ($r.ExitCode -ne 0) { Stop-Hv ('文件恢复失败（restic 退出码 ' + $r.ExitCode + '）。') $r.ExitCode }
         $dump = Join-HvPath (Get-HvEnvDictValue $Env 'HV_DUMP_DIR') 'nextcloud.sql'
         if (-not [System.IO.File]::Exists($dump)) { Stop-Hv ('快照中没有数据库导出：' + $dump) }
-        Write-HvStep '重建数据库 ...'
-        [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', 'postgres', '-c', 'DROP DATABASE IF EXISTS nextcloud WITH (FORCE)'))
-        [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', 'postgres', '-c', 'CREATE DATABASE nextcloud OWNER nextcloud'))
+        # the restored config.php names the database role Nextcloud uses (normally oc_<admin>, created by the installer):
+        # recreate that role with the backed-up password, then the database owned by it, then import (owners kept)
+        $db = Get-HvRestoredDbConfig
+        Write-HvStep ('重建数据库 ' + $db.Name + '（所有者 ' + $db.User + '）...')
+        [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', 'postgres') `
+                -InputText (New-HvRestoreDbSql -User $db.User -Password $db.Password -Name $db.Name) -Capture)
         [void](Invoke-HvCompose -Arguments @('cp', $dump, 'db:/tmp/hv-restore.sql'))
         try {
-            [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', 'nextcloud', '-f', '/tmp/hv-restore.sql'))
+            Write-HvInfo ('导入数据库转储（' + (ConvertTo-HvSizeText (New-Object System.IO.FileInfo($dump)).Length) + '）...')
+            [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', $db.Name, '-f', '/tmp/hv-restore.sql') -Capture)
         } finally {
             [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'rm', '-f', '/tmp/hv-restore.sql') -AllowFailure -Quiet)
         }
-        # the restored config.php carries the old DB password: make the database accept it and keep secrets\ in sync
-        $pw = Invoke-HvCompose -Arguments @('run', '--rm', '--no-deps', '-T', '--entrypoint', 'php', 'app', '-r', 'include ''/var/www/html/config/config.php''; echo $CONFIG[''dbpassword''];') -Capture -AllowFailure
-        $dbpw = ''
-        if ($pw.ExitCode -eq 0) { $dbpw = ($pw.Output | Select-Object -Last 1) }
-        if ($dbpw -match '^[A-Za-z0-9]{8,}$') {
-            [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', 'postgres') -InputText ("ALTER USER nextcloud WITH PASSWORD '" + $dbpw + "';") -Capture)
-            if ((Read-HvSecret 'postgres_password') -ne $dbpw) { Write-HvSecret -Name 'postgres_password' -Value $dbpw; Write-HvInfo '已同步 secrets\postgres_password 为备份中的数据库密码。' }
-        } else {
-            Write-HvWarn '未能从恢复的 config.php 读取数据库密码；如 Nextcloud 无法连接数据库，请手动核对 dbpassword。'
-        }
+        Write-HvOk '数据库已恢复。'
     } finally {
         Remove-Item -LiteralPath $overlay -Force -ErrorAction SilentlyContinue
     }

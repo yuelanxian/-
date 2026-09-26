@@ -34,12 +34,26 @@ HomeVault 家庭归档服务器 - Windows 管理工具 v$($script:HvVersion)
       --wg-host <DDNS域名|公网IP> --wg-port <端口> --vpn-cidr <网段> --vpn-dns <DNS> --no-vpn
       --tls-mode internal|acme-dns --dns-provider alidns|tencentcloud|cloudflare --acme-email <邮箱>
       --mirror daocloud|custom|none [--mirror-hub <前缀> --mirror-ghcr <前缀>]
-      --https-port 443 --http-port 80 --admin-port 8443 --admin-user hvadmin
+      --https-port 443 --http-port 80 --admin-port 8443 --panel-port 9443 --admin-user hvadmin
+      --log-dir <路径>        日志目录（默认 <数据盘>:\HomeVault\logs）  --log-retention <天数>  日志保留天数（1-365，默认 7）
       --config-only          只生成配置，不启动；--skip-autostart；--skip-backup-init
-  up [--wait] | down | restart [服务] | status | logs [服务] [--follow] [--tail N] | pull
+  up [--wait] | down | restart [服务] | status | pull
   update [--major] [--skip-backup]   先备份，再拉取镜像并重建容器；--major 升级一个 Nextcloud 大版本
   doctor                   健康与安全检查（✔/!/✘）
   autostart                配置开机无人值守（Docker 自启、自动登录、锁屏任务、电源；需管理员）
+
+日常管理与日志
+  menu                     数字菜单（桌面快捷方式“HomeVault 管理”打开的就是它）
+  logs [服务] [--follow] [--tail N]    查看容器日志
+  logs list                列出日志文件（日志目录 HV_LOG_DIR）
+  logs show <文件|服务> [--lines N]    显示日志内容
+  logs open                在资源管理器中打开日志文件夹
+  logs retention [天数]    查看或设置日志保留天数（1-365，默认 7）
+  logs clean               立即删除超过保留天数的日志
+  maintenance              每日维护：导出容器日志、清理过期日志、更新状态（计划任务 HomeVault-Maintenance）
+  requests process         执行管理面板提交的请求（计划任务 HomeVault-Requests，每 2 分钟）
+  status-update            更新管理面板读取的状态文件（state\*.json）
+  android fetch            下载最新的 HomeVault 安卓 App，供手机在管理面板中下载安装
 
 Nextcloud
   occ <参数...>            运行 Nextcloud occ 命令
@@ -62,6 +76,7 @@ DDNS
 
 备份与恢复（restic）
   backup [--init] [--check]            备份（--init 初始化仓库；--check 额外校验 5% 数据）
+  backup --snapshots | backup --unlock 列出快照 / 清除残留的仓库锁
   restore                              列出快照
   restore --ls <路径> [--snapshot ID]  浏览快照
   restore --files <快照内路径> [--snapshot ID]   恢复到 restore\<时间>\
@@ -78,13 +93,50 @@ DDNS
     Write-Host $t
 }
 
+function Get-HvCommandSummary {
+    # "<command> [<subcommand>]" for the CLI log (never names, paths or other values that could be sensitive).
+    param([string[]]$Argv)
+    $a = @($Argv)
+    if ($a.Count -eq 0) { return '' }
+    $t = ConvertTo-HvArgString $a[0]
+    if ($a.Count -gt 1) {
+        $sub = ConvertTo-HvArgString $a[1]
+        if ($sub -match '^[a-z][a-z0-9-]{0,20}$') { $t += (' ' + $sub) }
+    }
+    return $t
+}
+
+function Set-HvGlobalSwitches {
+    # Apply --yes / -y / --non-interactive without consuming them; returns the other arguments.
+    param([object[]]$Arguments = @())
+    $other = @()
+    foreach ($a in @($Arguments)) {
+        $s = ConvertTo-HvArgString $a
+        if ($s -match '^(?i)--?(yes|y)$') { $script:HvYes = $true; continue }
+        if ($s -match '^(?i)--?non-?interactive$') { $script:HvNonInteractive = $true; continue }
+        $other += $a
+    }
+    return $other
+}
+
+function Get-HvExternalCommand {
+    # Commands implemented by windows\lib modules that may be missing in a partial checkout.
+    param([string]$Function, [string]$Command)
+    $c = Get-Command -Name $Function -CommandType Function -ErrorAction SilentlyContinue
+    if (-not $c) { Stop-Hv ('此版本缺少“' + $Command + '”命令的实现（' + $Function + '）：请更新 HomeVault（git pull）后重试。') }
+    return $Function
+}
+
 function Invoke-HvMain {
     param([object[]]$Arguments = @())
     $argv = @($Arguments)
     if ($argv.Count -eq 0) { Show-HvHelp; return }
     $cmd = (ConvertTo-HvArgString $argv[0]).ToLowerInvariant()
     $rest = @()
-    if ($argv.Count -gt 1) { $rest = $argv[1..($argv.Count - 1)] }
+    if ($argv.Count -gt 1) { $rest = @($argv[1..($argv.Count - 1)]) }
+    if (@('help', '-h', '--help', '/?', '-?', 'version', '--version', '-v') -notcontains $cmd) {
+        try { if (Test-HvEnvExists) { Start-HvCliLog -LogDir (Get-HvEnvLogDir) -CommandText (Get-HvCommandSummary $argv) } } catch { }
+    }
     switch ($cmd) {
         { @('help', '-h', '--help', '/?', '-?') -contains $_ } { Show-HvHelp; return }
         { @('version', '--version', '-v') -contains $_ } { Write-Host ('HomeVault ' + $script:HvVersion + '（PowerShell ' + $PSVersionTable.PSVersion.ToString() + '）'); return }
@@ -93,7 +145,16 @@ function Invoke-HvMain {
         'down' { Invoke-HvCmdDown -Arguments $rest; return }
         'restart' { Invoke-HvCmdRestart -Arguments $rest; return }
         'status' { Invoke-HvCmdStatus -Arguments $rest; return }
-        'logs' { Invoke-HvCmdLogs -Arguments $rest; return }
+        'logs' {
+            [void](Set-HvGlobalSwitches $rest)
+            if (Get-Command -Name 'Invoke-HvLogs' -CommandType Function -ErrorAction SilentlyContinue) { Invoke-HvLogs @rest } else { Invoke-HvCmdLogs -Arguments $rest }
+            return
+        }
+        'menu' { $x = @(Set-HvGlobalSwitches $rest); & (Get-HvExternalCommand 'Invoke-HvMenu' 'menu') @x; return }
+        'maintenance' { $x = @(Set-HvGlobalSwitches $rest); & (Get-HvExternalCommand 'Invoke-HvMaintenance' 'maintenance') @x; return }
+        'status-update' { $x = @(Set-HvGlobalSwitches $rest); & (Get-HvExternalCommand 'Invoke-HvStatusUpdate' 'status-update') @x; return }
+        'requests' { [void](Set-HvGlobalSwitches $rest); & (Get-HvExternalCommand 'Invoke-HvRequests' 'requests') @rest; return }
+        'android' { [void](Set-HvGlobalSwitches $rest); & (Get-HvExternalCommand 'Invoke-HvAndroid' 'android') @rest; return }
         'pull' { Invoke-HvCmdPull -Arguments $rest; return }
         'update' { Invoke-HvCmdUpdate -Arguments $rest; return }
         'occ' { Invoke-HvCmdOcc -Arguments $rest; return }
@@ -115,6 +176,7 @@ function Invoke-HvMain {
 
 try {
     Invoke-HvMain -Arguments $args | Out-Host
+    if ($script:HvExitCode -ne 0) { Write-HvLog ('结束，退出码 ' + $script:HvExitCode) }
 } catch {
     Write-HvErr (Get-HvErrorMessage $_)
     $code = Get-HvExitCodeFromError $_

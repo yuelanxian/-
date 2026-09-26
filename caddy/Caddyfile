@@ -23,11 +23,12 @@
 
 # 访问日志：宿主机 HV_LOG_DIR/caddy/access.log（JSON 行；Cookie/Authorization 等敏感请求头自动脱敏）。
 # 超过 50 MiB 滚动为压缩文件，保留 HV_LOG_RETENTION_DAYS 天；每日维护任务也会按天数清理。
-# mode 0640：配合宿主机日志目录的默认 ACL，管理面板（uid 65532）可以只读查看。
+# mode 0644：访问控制由宿主机目录权限负责（Linux：caddy 目录 0750 + 给管理面板 uid 65532 的 ACL），
+# 这样即使宿主机没有 setfacl，管理面板也能只读查看。
 (access_log) {
 	log {
 		output file /var/log/homevault/caddy/access.log {
-			mode 0640
+			mode 0644
 			roll_size 50MiB
 			roll_keep 20
 			roll_keep_for {$HV_LOG_RETENTION_DAYS}d

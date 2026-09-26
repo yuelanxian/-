@@ -102,6 +102,8 @@ services:
       interval: 1m
       timeout: 10s
       retries: 3
+      start_period: 1m
+      start_interval: 5s
 
   db:
     image: ${POSTGRES_IMAGE:-docker.io/library/postgres:18-alpine}

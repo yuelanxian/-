@@ -131,10 +131,21 @@ export function render(view, ctx) {
       const r = await api.post(`/api/services/${encodeURIComponent(s.service)}/restart`);
       toast(r.message || '已重启', 'ok');
     } catch (e) {
-      toast(e.message, 'err');
+      // The panel itself is served through Caddy: restarting it cuts this very request.
+      if (s.service === 'caddy' && e.status === 0) {
+        toast('HTTPS 网关正在重启，几秒后自动恢复', 'ok');
+      } else {
+        toast(e.message, 'err');
+      }
     } finally {
       btn.disabled = false;
-      load();
+      // Caddy restarts in the background after answering: reload once the gateway is back.
+      if (s.service === 'caddy') {
+        clearTimeout(timer);
+        timer = setTimeout(load, 6000);
+      } else {
+        load();
+      }
     }
   }
 

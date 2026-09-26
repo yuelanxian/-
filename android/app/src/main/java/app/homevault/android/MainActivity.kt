@@ -53,6 +53,8 @@ class MainActivity : Activity() {
     private var mainFrameFailed = false
     private var clearHistoryAfterLoad = false
     private var certDialogShown = false
+    /** onReceivedSslError already explained the current failure; keep that message. */
+    private var certErrorShown = false
     private var lastSslError: SslError? = null
     private var dialog: AlertDialog? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
@@ -86,7 +88,15 @@ class MainActivity : Activity() {
 
         configureWebView()
         updateTitle()
-        if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) {
+        if (config.sessionUrl != panelUrl) {
+            // Cookies / storage / cache still belong to another server (e.g. the server was changed and
+            // the process was killed before this activity resumed): wipe them before the first load.
+            resetWebSession { webView.loadUrl(panelUrl) }
+            return
+        }
+        // Only restore a WebView state saved for this very server.
+        val state = savedInstanceState?.takeIf { it.getString(STATE_PANEL_URL) == panelUrl }
+        if (state == null || webView.restoreState(state) == null) {
             webView.loadUrl(panelUrl)
         }
     }
@@ -150,7 +160,10 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        if (webViewAlive) webView.saveState(outState)
+        if (webViewAlive) {
+            webView.saveState(outState)
+            outState.putString(STATE_PANEL_URL, panelUrl)
+        }
     }
 
     override fun onDestroy() {
@@ -172,16 +185,31 @@ class MainActivity : Activity() {
     /** A different server was saved in SetupActivity: drop the old session completely. */
     private fun switchServer(newUrl: String) {
         panelUrl = newUrl
-        certDialogShown = false
-        lastSslError = null
-        CookieManager.getInstance().removeAllCookies(null)
-        CookieManager.getInstance().flush()
-        WebStorage.getInstance().deleteAllData()
-        webView.clearCache(true)
-        clearHistoryAfterLoad = true
         updateTitle()
         hideError()
-        webView.loadUrl(panelUrl)
+        webView.stopLoading()
+        resetWebSession { webView.loadUrl(panelUrl) }
+    }
+
+    /**
+     * Removes cookies, web storage, HTTP cache and history of the previous server, records that the
+     * WebView now belongs to [panelUrl], then runs [then]. Cookies are removed asynchronously and are
+     * not port-scoped, so nothing is loaded before the removal has finished.
+     */
+    private fun resetWebSession(then: () -> Unit) {
+        val target = panelUrl
+        certDialogShown = false
+        lastSslError = null
+        clearHistoryAfterLoad = true
+        WebStorage.getInstance().deleteAllData()
+        webView.clearCache(true)
+        webView.clearHistory()
+        val cookies = CookieManager.getInstance()
+        cookies.removeAllCookies {
+            cookies.flush()
+            config.sessionUrl = target
+            if (webViewAlive && target == panelUrl) then()
+        }
     }
 
     private fun retry() {
@@ -209,6 +237,7 @@ class MainActivity : Activity() {
 
     private fun hideError() {
         mainFrameFailed = false
+        certErrorShown = false
         errorView.visibility = View.GONE
     }
 
@@ -248,7 +277,9 @@ class MainActivity : Activity() {
             WebViewClient.ERROR_TIMEOUT,
             WebViewClient.ERROR_IO,
             -> getString(R.string.error_connect, host)
-            WebViewClient.ERROR_FAILED_SSL_HANDSHAKE -> getString(R.string.error_ssl)
+            // Certificate problems arrive in onReceivedSslError; this is a TLS failure without one
+            // (not an HTTPS port, no certificate for this address, protocol error).
+            WebViewClient.ERROR_FAILED_SSL_HANDSHAKE -> getString(R.string.error_tls, host)
             else -> getString(R.string.error_generic, description?.toString() ?: errorCode.toString())
         }
     }
@@ -275,10 +306,9 @@ class MainActivity : Activity() {
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-            if (request.isForMainFrame) {
-                val ssl = error.errorCode == ERROR_FAILED_SSL_HANDSHAKE
-                showError(errorText(error.errorCode, error.description), ssl)
-            }
+            if (!request.isForMainFrame || certErrorShown) return
+            val ssl = error.errorCode == ERROR_FAILED_SSL_HANDSHAKE
+            showError(errorText(error.errorCode, error.description), ssl)
         }
 
         override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
@@ -293,6 +323,7 @@ class MainActivity : Activity() {
             if (!UrlRules.isSameOrigin(error.url, panelUrl)) return
             lastSslError = error
             showError(getString(R.string.error_ssl), true)
+            certErrorShown = true
             if (!certDialogShown) {
                 certDialogShown = true
                 showCertificateHelp()
@@ -366,9 +397,13 @@ class MainActivity : Activity() {
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             if (!mimeType.isNullOrBlank()) request.setMimeType(mimeType)
             if (!userAgent.isNullOrBlank()) request.addRequestHeader("User-Agent", userAgent)
-            // The panel session cookie (HttpOnly) is readable here; DownloadManager needs it for authenticated downloads.
-            CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }?.let {
-                request.addRequestHeader("Cookie", it)
+            // The panel session cookie (HttpOnly) is readable here; DownloadManager needs it for authenticated
+            // downloads. Only for the panel itself: cookies are not port-scoped, so getCookie() would also
+            // hand the panel session to any other service on the same host (e.g. Nextcloud on 443).
+            if (UrlRules.isSameOrigin(url, panelUrl)) {
+                CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }?.let {
+                    request.addRequestHeader("Cookie", it)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
@@ -441,5 +476,6 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQUEST_FILE_CHOOSER = 1001
+        const val STATE_PANEL_URL = "app.homevault.android.PANEL_URL"
     }
 }

@@ -116,7 +116,8 @@ install_summary() {
 	local first=$1 fp='' ca=$HV_ROOT/clients/HomeVault-CA.crt
 	printf '\n%s================ HomeVault 安装完成 ================%s\n' "$_C_BLD" "$_C_RST"
 	msg "访问地址（手机/电脑/浏览器统一使用）：$HV_OVERWRITE_CLI_URL"
-	msg "管理面板：https://$HV_HOST:$HV_PANEL_PORT"
+	msg "管理面板（手机 App / 浏览器，用 Nextcloud 管理员登录）：$(hv_panel_url)"
+	msg "日志目录：${HV_LOG_DIR}（保留 $(logs_retention_days) 天；修改：sudo $HV_SELF logs retention <天数>）"
 	if ((first)); then
 		msg "Nextcloud 管理员：$HV_ADMIN_USER"
 		msg "初始密码（只显示这一次）：$(cat "$HV_ROOT/secrets/nextcloud_admin_password")"
@@ -132,7 +133,7 @@ install_summary() {
 		fp=$(cert_fingerprint "$ca")
 		msg "根证书：$ca"
 		msg "  SHA-256 指纹：$fp"
-		msg "  每台手机/电脑需安装一次（$HV_SELF ca 显示安装方法）"
+		msg "  每台手机/电脑需安装一次（$HV_SELF ca 显示安装方法；手机也可浏览器打开 $(hv_panel_url)/ca.crt 下载）"
 	fi
 	if vpn_enabled; then
 		msg "VPN 管理界面：https://$HV_HOST:$HV_ADMIN_PORT （用户 hvadmin，密码见 secrets/wg_easy_admin_password）"
@@ -414,6 +415,7 @@ cmd_install() {
 
 	env_load
 	env_defaults
+	hv_ensure_env_keys
 	hv_validate_env || die ".env 配置有误"
 	hv_write_derived
 	install_check_ports
@@ -428,17 +430,21 @@ cmd_install() {
 	install -d -m 0755 "$HV_DATA_DIR"
 	install_dir "$HV_VOL_HTML" 0750 33:33
 	install_dir "$HV_NC_DATA_PATH" 0750 33:33
-	install_dir "$HV_VOL_DB" 0700
+	# PostgreSQL 18 mounts /var/lib/postgresql itself: the image's postgres user must be able to traverse it.
+	# The entrypoint chowns only PGDATA (18/docker, kept 0700); a 0700 root-owned mount makes initdb fail.
+	install_dir "$HV_VOL_DB" 0755
+	if [[ $HV_VOL_DB == /* && $(stat -c '%u %a' "$HV_VOL_DB" 2>/dev/null) == '0 700' ]]; then
+		chmod 0755 "$HV_VOL_DB"
+	fi
 	install_dir "$HV_VOL_REDIS" 0700
 	install_dir "$HV_VOL_CADDY_DATA" 0700
 	install_dir "$HV_VOL_CADDY_CONFIG" 0700
 	vpn_enabled && install_dir "$HV_VOL_WGEASY" 0700
 	install_dir "$HV_DUMP_DIR" 0700
 	[[ $HV_BACKUP_TARGET == local && -n $HV_BACKUP_LOCAL_PATH ]] && install_dir "$HV_BACKUP_LOCAL_PATH" 0700
-	install -d -m 0755 "$HV_STATE_DIR"
-	install -d -m 0750 -o 65532 -g 65532 "$HV_STATE_DIR/requests" 2>/dev/null || install -d -m 0750 "$HV_STATE_DIR/requests"
+	state_prepare_dirs
 	install -d -m 0700 "$HV_ROOT/clients"
-	logs_prepare_dirs
+	logs_prepare_dirs verbose
 	if [[ -n $(find "$HV_NC_DATA_PATH" -mindepth 1 -maxdepth 1 ! -name '.ncdata' -print -quit 2>/dev/null) && ! -e $HV_NC_DATA_PATH/.ncdata ]]; then
 		warn "Nextcloud 文件目录非空：$HV_NC_DATA_PATH 中已有的文件不会自动出现在 Nextcloud 中（请用「额外存储」挂载已有数据）"
 	fi
@@ -467,6 +473,7 @@ cmd_install() {
 		info "构建带 DNS 插件的 Caddy 镜像（首次需要几分钟）…"
 		dc build caddy || die "Caddy 构建失败（国内请使用 --mirror，确认 HV_GOPROXY）"
 	fi
+	panel_build_if_needed || die "无法构建管理面板镜像"
 	title "启动服务"
 	dc up -d || die "启动失败（查看：$HV_SELF logs）"
 	wait_app_ready "$o_timeout" || die "Nextcloud 未能就绪"

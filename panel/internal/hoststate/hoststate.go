@@ -250,8 +250,11 @@ func (s *Store) Submit(typ string, days int, user, ip string) (*Request, bool, e
 		return nil, false, ErrTooManyPending
 	}
 	if typ != TypeLogRetention {
-		for _, p := range pending {
-			if p.Type == typ {
+		// Reuse a waiting request of the same type, or one the host is executing right now
+		// (moved to done/ without a result yet): a second backup would only repeat the first.
+		running, _ := readRequestDir(filepath.Join(dir, doneDir), false, s.Now())
+		for _, p := range append(pending, running...) {
+			if p.Type == typ && (p.State == "pending" || p.State == "running") {
 				r := &Request{ID: p.ID, Type: p.Type, RequestedBy: p.RequestedBy, Source: "panel"}
 				if p.Created != nil {
 					r.Created = p.Created.Time
@@ -303,9 +306,9 @@ func writeAtomic(dir, name string, data []byte) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
+	// Best effort: some bind-mount filesystems (Docker Desktop file sharing) may reject fsync;
+	// a lost request file only means the user presses the button again.
+	_ = tmp.Sync()
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -330,6 +333,9 @@ func (s *Store) Requests(doneLimit int) (pending, done []RequestStatus) {
 	s.mu.Lock()
 	pending, _ = s.pendingLocked()
 	s.mu.Unlock()
+	if doneLimit <= 0 {
+		return pending, nil
+	}
 	done, _ = readRequestDir(filepath.Join(s.Dir, requestsDir, doneDir), false, s.Now())
 	if len(done) > doneLimit {
 		done = done[:doneLimit]
@@ -381,7 +387,10 @@ func readRequestDir(dir string, pendingDir bool, now time.Time) ([]RequestStatus
 	if err != nil {
 		return nil, err
 	}
-	type pair struct{ req, res string }
+	type pair struct {
+		req, res string
+		mtime    time.Time // of the request file (fallback when it has no "created")
+	}
 	byKey := map[string]*pair{}
 	for _, e := range ents {
 		n := e.Name()
@@ -404,6 +413,9 @@ func readRequestDir(dir string, pendingDir bool, now time.Time) ([]RequestStatus
 			p.res = n
 		} else {
 			p.req = n
+			if fi, err := e.Info(); err == nil {
+				p.mtime = fi.ModTime()
+			}
 		}
 	}
 	keys := make([]string, 0, len(byKey))
@@ -460,7 +472,11 @@ func readRequestDir(dir string, pendingDir bool, now time.Time) ([]RequestStatus
 		case state == "":
 			// Moved to done/ but no result yet: the host is executing it (or crashed doing so).
 			state = "running"
-			if rs.Created != nil && !rs.Created.IsZero() && now.Sub(rs.Created.Time) > staleRunning {
+			started := p.mtime
+			if rs.Created != nil && !rs.Created.IsZero() {
+				started = rs.Created.Time
+			}
+			if !started.IsZero() && now.Sub(started) > staleRunning {
 				state = "unknown"
 			}
 		}

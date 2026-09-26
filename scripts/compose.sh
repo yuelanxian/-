@@ -120,15 +120,62 @@ wait_service() {
 stack_running() { [[ -n $(dc_cid app) && $(dc_state app) != exited ]]; }
 
 # ---------------------------------------------------------------------------
+# Management panel image (built locally from panel/, never pulled — SPEC §15)
+# ---------------------------------------------------------------------------
+# Hash of everything that goes into the panel image (sources + image name + registry prefix)
+panel_src_hash() {
+	local d=$HV_ROOT/panel
+	[[ -f $d/Dockerfile ]] || return 1
+	{
+		printf '%s\n%s\n' "${PANEL_IMAGE:-homevault/panel:1.0.0}" "${HV_MIRROR_HUB:-}"
+		(cd "$d" && find Dockerfile go.mod cmd internal web -type f ! -name '*_test.go' -print0 2>/dev/null |
+			LC_ALL=C sort -z | xargs -0 -r sha256sum)
+	} | sha256sum | cut -c1-64
+}
+
+# panel_build_if_needed [force] — docker compose build panel when the image is missing or panel/ changed
+panel_build_if_needed() {
+	local force=${1:-0} img want have=''
+	compose_services | grep -qx panel || return 0
+	img=${PANEL_IMAGE:-homevault/panel:1.0.0}
+	want=$(panel_src_hash) || return 0
+	[[ -f $HV_STATE_DIR/panel-build.sha ]] && have=$(<"$HV_STATE_DIR/panel-build.sha")
+	if ((force == 0)) && [[ $want == "$have" ]] && docker image inspect "$img" >/dev/null 2>&1; then
+		return 0
+	fi
+	info "构建管理面板镜像 $img（在本机构建，首次约需 1–2 分钟）…"
+	if dc build panel; then
+		mkdir -p "$HV_STATE_DIR"
+		printf '%s\n' "$want" >"$HV_STATE_DIR/panel-build.sha"
+		ok "管理面板镜像已就绪"
+		return 0
+	fi
+	if docker image inspect "$img" >/dev/null 2>&1; then
+		warn "管理面板镜像构建失败，继续使用已有的 $img（稍后可运行：$HV_SELF compose build panel）"
+		return 0
+	fi
+	err "管理面板镜像构建失败（需要下载 golang 基础镜像；中国大陆请使用 install --mirror daocloud）"
+	return 1
+}
+
+# Everything `up` needs before docker compose runs (idempotent; directories only as root)
+hv_prepare_up() {
+	hv_ensure_env_keys
+	hv_write_derived
+	storage_render_if_needed
+	logs_prepare_dirs
+	state_prepare_dirs
+	panel_build_if_needed || die "无法构建管理面板镜像"
+}
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 cmd_up() {
 	local recreate=()
 	[[ ${1:-} == --force-recreate ]] && recreate=(--force-recreate)
 	hv_require_env
-	hv_write_derived
-	storage_render_if_needed
-	logs_prepare_dirs
+	hv_prepare_up
 	info "启动服务…"
 	dc up -d "${recreate[@]}"
 	ok "已启动。状态：$HV_SELF status"
@@ -143,7 +190,7 @@ cmd_down() {
 cmd_restart() {
 	hv_require_env
 	if (($#)); then dc restart "$@"; else
-		hv_write_derived
+		hv_prepare_up
 		dc up -d
 		dc restart
 	fi
@@ -156,6 +203,7 @@ cmd_status() {
 		msg "最近一次成功备份：$(cat "$HV_ROOT/state/last-backup-ok")"
 	fi
 	msg "访问地址：$HV_OVERWRITE_CLI_URL"
+	msg "管理面板：$(hv_panel_url)"
 }
 
 cmd_pull() { # [--quiet] [服务…]
@@ -229,14 +277,14 @@ cmd_update() {
 		confirm "确认升级？" n || die "已取消"
 		env_set NEXTCLOUD_IMAGE "$new"
 	fi
-	hv_write_derived
-	storage_render_if_needed
+	hv_prepare_up
 	info "拉取镜像…"
 	cmd_pull --quiet
 	if [[ $HV_TLS_MODE == acme-dns ]]; then
 		info "重新构建带 DNS 插件的 Caddy…"
 		dc build --pull caddy
 	fi
+	panel_build_if_needed || die "无法构建管理面板镜像"
 	dc up -d
 	wait_app_ready 3600 || die "升级后 Nextcloud 未就绪，请查看：$HV_SELF logs app"
 	occ db:add-missing-indices || warn "db:add-missing-indices 执行失败"

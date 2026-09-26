@@ -117,46 +117,70 @@ function ConvertTo-HvYamlSingleQuoted {
     return ("'" + ($Text -replace "'", "''") + "'")
 }
 
+function Get-HvPanelStatMounts {
+    # Pure: read-only mounts that let the management panel show disk usage (SPEC section 15):
+    # /config/storage.conf, /stat/data (NC data), /stat/backup (local backup target), /stat/storage/<slug>.
+    param([object[]]$Rows = @(), [string]$StorageConfPath = '', [string]$NcDataPath = '', [string]$BackupPath = '')
+    $m = @()
+    if ($StorageConfPath) { $m += [pscustomobject]@{ Source = $StorageConfPath; Target = '/config/storage.conf'; Comment = 'storage.conf' } }
+    if ($NcDataPath) { $m += [pscustomobject]@{ Source = $NcDataPath; Target = '/stat/data'; Comment = 'Nextcloud 主数据' } }
+    if ($BackupPath) { $m += [pscustomobject]@{ Source = $BackupPath; Target = '/stat/backup'; Comment = '本地备份仓库' } }
+    foreach ($r in @($Rows)) { $m += [pscustomobject]@{ Source = $r.Path; Target = ('/stat/storage/' + $r.Slug); Comment = $r.Name } }
+    return $m
+}
+
+function Get-HvYamlBindEntry {
+    param([string]$Source, [string]$Target, [bool]$ReadOnly, [string]$Comment = '')
+    $sb = New-Object System.Text.StringBuilder
+    if ($Comment) { [void]$sb.Append('      # ' + ($Comment -replace "[`r`n]", ' ') + "`n") }
+    $ro = 'false'
+    if ($ReadOnly) { $ro = 'true' }
+    [void]$sb.Append("      - type: bind`n")
+    [void]$sb.Append('        source: ' + (ConvertTo-HvYamlSingleQuoted $Source) + "`n")
+    [void]$sb.Append('        target: ' + $Target + "`n")
+    [void]$sb.Append('        read_only: ' + $ro + "`n")
+    [void]$sb.Append("        bind:`n")
+    [void]$sb.Append("          create_host_path: false`n")
+    return $sb.ToString()
+}
+
 function ConvertTo-HvComposeStorageYaml {
-    # Pure: compose overlay adding external storages to app/cron (rw/ro) and backup (ro, backup=yes only).
-    param([object[]]$Rows = @())
+    # Pure: compose overlay adding external storages to app/cron (rw/ro) and backup (ro, backup=yes only),
+    # plus the panel's read-only stat mounts (from Get-HvPanelStatMounts).
+    param([object[]]$Rows = @(), [object[]]$PanelMounts = @())
     $rows2 = @($Rows)
+    $panel = @($PanelMounts)
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("# 由 HomeVault 自动生成（storage apply），请勿手工编辑；请修改 storage.conf 后运行 storage apply。`n")
-    if ($rows2.Count -eq 0) {
+    if ($rows2.Count -eq 0 -and $panel.Count -eq 0) {
         [void]$sb.Append("services: {}`n")
         return $sb.ToString()
     }
-    $mountBlock = New-Object System.Text.StringBuilder
-    foreach ($r in $rows2) {
-        $ro = 'false'
-        if ($r.ReadOnly) { $ro = 'true' }
-        [void]$mountBlock.Append('      # ' + ($r.Name -replace "[`r`n]", ' ') + ' (' + $r.Mode + ")`n")
-        [void]$mountBlock.Append("      - type: bind`n")
-        [void]$mountBlock.Append('        source: ' + (ConvertTo-HvYamlSingleQuoted $r.Path) + "`n")
-        [void]$mountBlock.Append('        target: ' + $script:HvMountPrefix + $r.Slug + "`n")
-        [void]$mountBlock.Append('        read_only: ' + $ro + "`n")
-        [void]$mountBlock.Append("        bind:`n")
-        [void]$mountBlock.Append("          create_host_path: false`n")
-    }
     [void]$sb.Append("services:`n")
-    foreach ($svc in @('app', 'cron')) {
-        [void]$sb.Append('  ' + $svc + ":`n")
-        [void]$sb.Append("    volumes:`n")
-        [void]$sb.Append($mountBlock.ToString())
+    if ($rows2.Count -gt 0) {
+        $mountBlock = New-Object System.Text.StringBuilder
+        foreach ($r in $rows2) {
+            [void]$mountBlock.Append((Get-HvYamlBindEntry -Source $r.Path -Target ($script:HvMountPrefix + $r.Slug) -ReadOnly ([bool]$r.ReadOnly) -Comment ($r.Name + ' (' + $r.Mode + ')')))
+        }
+        foreach ($svc in @('app', 'cron')) {
+            [void]$sb.Append('  ' + $svc + ":`n")
+            [void]$sb.Append("    volumes:`n")
+            [void]$sb.Append($mountBlock.ToString())
+        }
+        $backupRows = @($rows2 | Where-Object { $_.Backup })
+        if ($backupRows.Count -gt 0) {
+            [void]$sb.Append("  backup:`n")
+            [void]$sb.Append("    volumes:`n")
+            foreach ($r in $backupRows) {
+                [void]$sb.Append((Get-HvYamlBindEntry -Source $r.Path -Target ('/src/storage/' + $r.Slug) -ReadOnly $true -Comment $r.Name))
+            }
+        }
     }
-    $backupRows = @($rows2 | Where-Object { $_.Backup })
-    if ($backupRows.Count -gt 0) {
-        [void]$sb.Append("  backup:`n")
+    if ($panel.Count -gt 0) {
+        [void]$sb.Append("  panel:`n")
         [void]$sb.Append("    volumes:`n")
-        foreach ($r in $backupRows) {
-            [void]$sb.Append('      # ' + ($r.Name -replace "[`r`n]", ' ') + "`n")
-            [void]$sb.Append("      - type: bind`n")
-            [void]$sb.Append('        source: ' + (ConvertTo-HvYamlSingleQuoted $r.Path) + "`n")
-            [void]$sb.Append('        target: /src/storage/' + $r.Slug + "`n")
-            [void]$sb.Append("        read_only: true`n")
-            [void]$sb.Append("        bind:`n")
-            [void]$sb.Append("          create_host_path: false`n")
+        foreach ($m in $panel) {
+            [void]$sb.Append((Get-HvYamlBindEntry -Source $m.Source -Target $m.Target -ReadOnly $true -Comment ([string]$m.Comment)))
         }
     }
     return $sb.ToString()
@@ -322,10 +346,29 @@ function Test-HvStoragePathUsable {
     return $p
 }
 
+function Get-HvPanelStatMountsForHost {
+    # Panel stat mounts for this installation. On Windows only existing paths are mounted: a disconnected
+    # USB backup disk must not stop the panel from starting (regenerated on every up / backup / storage apply).
+    param([object[]]$Rows = @())
+    $envv = Get-HvEnv
+    $conf = Get-HvStorageConfPath
+    if (-not [System.IO.File]::Exists($conf)) { $conf = '' }
+    $bk = ''
+    if ((Get-HvEnvDictValue $envv 'HV_BACKUP_TARGET') -eq 'local') { $bk = Get-HvEnvDictValue $envv 'HV_BACKUP_LOCAL_PATH' }
+    $all = @(Get-HvPanelStatMounts -Rows $Rows -StorageConfPath $conf -NcDataPath (Get-HvEnvDictValue $envv 'HV_NC_DATA_PATH') -BackupPath $bk)
+    if (-not (Test-HvWindows)) { return $all }
+    $ok = @()
+    foreach ($m in $all) {
+        if ([System.IO.Directory]::Exists($m.Source) -or [System.IO.File]::Exists($m.Source)) { $ok += $m }
+        else { Write-HvWarn ('管理面板暂不显示 ' + $m.Source + ' 的容量（目录不存在或硬盘未连接）。') }
+    }
+    return $ok
+}
+
 function Write-HvComposeStorageFile {
-    # Regenerate compose.storage.yaml from storage.conf; returns $true when the content changed.
+    # Regenerate compose.storage.yaml from storage.conf (+ panel stat mounts); returns $true when the content changed.
     $rows = Get-HvStorageRows
-    $yaml = ConvertTo-HvComposeStorageYaml -Rows $rows
+    $yaml = ConvertTo-HvComposeStorageYaml -Rows $rows -PanelMounts (Get-HvPanelStatMountsForHost -Rows $rows)
     $p = Get-HvPath 'compose.storage.yaml'
     $old = ''
     if ([System.IO.File]::Exists($p)) { $old = Read-HvTextFile $p }

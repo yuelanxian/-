@@ -11,7 +11,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -44,6 +47,8 @@ type mockNC struct {
 	xff       []string
 	hosts     []string
 	pollToken string
+	userCalls int           // GET /ocs/v2.php/cloud/user requests
+	delay     time.Duration // artificial latency of every request
 }
 
 func newMockNC() *mockNC {
@@ -52,6 +57,10 @@ func newMockNC() *mockNC {
 }
 
 func (m *mockNC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	d := m.delay
+	m.mu.Unlock()
+	time.Sleep(d)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.hosts = append(m.hosts, r.Host)
@@ -84,6 +93,7 @@ func (m *mockNC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write([]byte(`{"server":"https://nas.example:8443","loginName":"` + m.user + `","appPassword":"` + m.password + `"}`))
 	case "GET /ocs/v2.php/cloud/user":
+		m.userCalls++
 		if !authOK() {
 			ocs(http.StatusUnauthorized, []any{})
 			return
@@ -122,6 +132,7 @@ func (m *mockNC) isRevoked(p string) bool {
 type mockDocker struct {
 	mu        sync.Mutex
 	restarted []string
+	withCaddy bool
 }
 
 func dframe(stream byte, s string) []byte {
@@ -138,11 +149,17 @@ func (m *mockDocker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/containers/json":
-		_ = json.NewEncoder(w).Encode([]map[string]any{
+		list := []map[string]any{
 			{"Id": "app1", "Names": []string{"/homevault-app-1"}, "State": "running", "Labels": lbl("app")},
 			{"Id": "db1", "Names": []string{"/homevault-db-1"}, "State": "running", "Labels": lbl("db")},
 			{"Id": "panel1", "Names": []string{"/homevault-panel-1"}, "State": "running", "Labels": lbl("panel")},
-		})
+		}
+		m.mu.Lock()
+		if m.withCaddy {
+			list = append(list, map[string]any{"Id": "caddy1", "Names": []string{"/homevault-caddy-1"}, "State": "running", "Labels": lbl("caddy")})
+		}
+		m.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(list)
 	case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/json"):
 		_, _ = w.Write([]byte(`{"State":{"Status":"running","StartedAt":"2026-09-26T00:00:00Z","Health":{"Status":"healthy"}},"Config":{"Tty":false}}`))
 	case r.Method == "GET" && r.URL.Path == "/containers/app1/logs":
@@ -412,6 +429,66 @@ func TestPasswordLoginAndRateLimit(t *testing.T) {
 	}
 }
 
+// Parallel wrong guesses must not slip past the per-IP limit while earlier attempts are still
+// being checked against Nextcloud (check-then-act race).
+func TestPasswordLoginRateLimitConcurrent(t *testing.T) {
+	h := newHarness(t)
+	h.nc.mu.Lock()
+	h.nc.delay = 50 * time.Millisecond
+	h.nc.mu.Unlock()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	codes := map[int]int{}
+	for i := 0; i < 40; i++ {
+		wg.Go(func() {
+			req := httptest.NewRequest("POST", "https://nas.example:9443/api/auth/password",
+				strings.NewReader(`{"user":"hvadmin","app_password":"guess"}`))
+			req.RemoteAddr = "192.0.2.10:44444"
+			req.Header.Set("X-Forwarded-For", "10.99.77.66")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.s.Handler().ServeHTTP(rec, req)
+			mu.Lock()
+			codes[rec.Code]++
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	h.nc.mu.Lock()
+	calls := h.nc.userCalls
+	h.nc.mu.Unlock()
+	if calls > 5 || codes[401] > 5 || codes[429] < 35 {
+		t.Fatalf("per-IP limit bypassed by parallel requests: %d Nextcloud checks, status codes %v", calls, codes)
+	}
+	// a correct app password afterwards from another IP still works and does not use up the global budget
+	res := h.do("POST", "/api/auth/password", map[string]string{"user": "hvadmin", "app_password": "MANUAL-APP-PASSWORD"},
+		"X-Forwarded-For", "10.99.77.67")
+	if res.StatusCode != 200 {
+		t.Fatalf("valid login from another IP: %d", res.StatusCode)
+	}
+}
+
+// Clicking "使用 Nextcloud 登录" again replaces the browser's previous flow instead of leaving it
+// polling for 20 minutes (and occupying one of the MaxPendingFlows slots).
+func TestFlowRestartCancelsPrevious(t *testing.T) {
+	h := newHarness(t)
+	h.nc.mu.Lock()
+	h.nc.grantAt = 1 << 30
+	h.nc.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		if res := h.do("POST", "/api/auth/flow", nil); res.StatusCode != 200 {
+			t.Fatalf("flow start %d: %d", i, res.StatusCode)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for h.s.flows.Pending() != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := h.s.flows.Pending(); n != 1 {
+		t.Fatalf("pending flows = %d, want 1", n)
+	}
+}
+
 func TestCrossOriginRejected(t *testing.T) {
 	h := newHarness(t)
 	res := h.do("POST", "/api/auth/flow", nil, "Sec-Fetch-Site", "cross-site")
@@ -600,9 +677,28 @@ func TestBackupRunAndRestartAllowList(t *testing.T) {
 		t.Fatalf("missing container: %d", res.StatusCode)
 	}
 	h.dk.mu.Lock()
-	defer h.dk.mu.Unlock()
 	if len(h.dk.restarted) != 1 || h.dk.restarted[0] != "/containers/app1/restart" {
 		t.Fatalf("restarted %v", h.dk.restarted)
+	}
+	h.dk.withCaddy = true
+	h.dk.mu.Unlock()
+	// Caddy carries this very request: the panel answers first and restarts in the background.
+	if res := h.do("POST", "/api/services/caddy/restart", nil); res.StatusCode != 202 {
+		t.Fatalf("caddy restart: %d", res.StatusCode)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		h.dk.mu.Lock()
+		n := len(h.dk.restarted)
+		last := h.dk.restarted[n-1]
+		h.dk.mu.Unlock()
+		if n == 2 && last == "/containers/caddy1/restart" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("caddy not restarted: %d %s", n, last)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -765,5 +861,22 @@ func TestStorageFallsBackToHostDisks(t *testing.T) {
 	alerts, _ := json.Marshal(m["alerts"])
 	if !strings.Contains(string(alerts), "10%") {
 		t.Fatalf("low-space alert missing: %s", alerts)
+	}
+}
+
+// A log the panel user may not read (host without setfacl: Nextcloud writes 0640 files) must be
+// reported as a permission problem, not as an invalid path.
+func TestLogFileErrorPermission(t *testing.T) {
+	rec := httptest.NewRecorder()
+	logFileError(rec, &fs.PathError{Op: "openat", Path: "nextcloud/nextcloud.log", Err: syscall.EACCES})
+	var m map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &m)
+	if rec.Code != http.StatusForbidden || !strings.Contains(m["error"], "权限") {
+		t.Fatalf("permission error mapped to %d %q", rec.Code, m["error"])
+	}
+	rec = httptest.NewRecorder()
+	logFileError(rec, &fs.PathError{Op: "openat", Path: "../x.log", Err: errors.New("path escapes from parent")})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("escape mapped to %d", rec.Code)
 	}
 }

@@ -28,6 +28,13 @@ func TestDefaults(t *testing.T) {
 	if len(c.RestartAllowList) != 7 {
 		t.Fatal(c.RestartAllowList)
 	}
+	if len(c.CACertFiles) != 2 || c.CACertFiles[0] != "/ca/root.crt" || c.CACertFiles[1] != "/state/ca.crt" {
+		t.Fatalf("ca cert candidates: %v", c.CACertFiles)
+	}
+	c, err = FromLookup(env(map[string]string{"HV_HOST": "h", "CA_CERT_FILE": "/x/root.crt"}))
+	if err != nil || len(c.CACertFiles) != 1 || c.CACertFiles[0] != "/x/root.crt" {
+		t.Fatalf("CA_CERT_FILE override: %v %v", c, err)
+	}
 }
 
 func TestOverrides(t *testing.T) {
@@ -55,9 +62,6 @@ func TestOverrides(t *testing.T) {
 func TestInvalid(t *testing.T) {
 	bad := []map[string]string{
 		{},
-		{"HV_HOST": "h", "HV_LOG_RETENTION_DAYS": "0"},
-		{"HV_HOST": "h", "HV_LOG_RETENTION_DAYS": "366"},
-		{"HV_HOST": "h", "HV_LOG_RETENTION_DAYS": "7d"},
 		{"HV_HOST": "h", "SESSION_TTL": "1s"},
 		{"HV_HOST": "h", "HV_PUBLIC_URL": "ftp://x"},
 		{"HV_HOST": "h", "HV_PUBLIC_URL": "https://user:pw@x"},
@@ -67,6 +71,17 @@ func TestInvalid(t *testing.T) {
 	for _, m := range bad {
 		if _, err := FromLookup(env(m)); err == nil {
 			t.Errorf("accepted %v", m)
+		}
+	}
+}
+
+// HV_LOG_RETENTION_DAYS is only a display fallback: a bad value falls back to 7 with a warning
+// instead of crash-looping the panel.
+func TestBadRetentionFallsBack(t *testing.T) {
+	for _, v := range []string{"0", "366", "7d", "abc"} {
+		c, err := FromLookup(env(map[string]string{"HV_HOST": "h", "HV_LOG_RETENTION_DAYS": v}))
+		if err != nil || c.DefaultRetention != 7 || len(c.Warnings) != 1 {
+			t.Errorf("%q: %v %+v", v, err, c)
 		}
 	}
 }

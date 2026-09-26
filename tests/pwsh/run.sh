@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # PowerShell tests for the Windows CLI (windows/hv.ps1 + windows/lib/*.ps1).
 #   1. static checks in mcr.microsoft.com/powershell: parse, UTF-8 BOM, PS 5.1 compatibility, templates
-#   2. unit tests of the pure functions (slug vectors computed here in bash)
+#   2. unit tests of the pure functions (slug vectors computed here in bash): unit.ps1 (CLI core), unit-ux.ps1 (logs/status/menu)
 #   3. integration tests: hv.ps1 install --config-only / storage / ddns against throwaway copies
 #   4. host side: `docker compose config` of the generated compose.storage.yaml / restore overlay /
 #      generated .env with the real compose.yaml; node check of the rendered QR page (if node exists)
-# Exits non-zero on any failure. Needs Docker. Env: HV_PWSH_IMAGE (default mcr.microsoft.com/powershell:latest).
+#   5. the state files hv.ps1 writes (backup-status / snapshots / status / vpn-status) decode with the panel's Go types
+# Exits non-zero on any failure. Needs Docker. Env: HV_PWSH_IMAGE (default mcr.microsoft.com/powershell:latest),
+# HV_GO_IMAGE (default golang:1.26-alpine; the Go check is skipped when the image is not available).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 IMAGE=${HV_PWSH_IMAGE:-mcr.microsoft.com/powershell:latest}
+GO_IMAGE=${HV_GO_IMAGE:-golang:1.26-alpine}
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/hv-pwsh.XXXXXX")
 cleanup() { rm -rf "$OUT"; }
 trap cleanup EXIT
@@ -49,6 +52,11 @@ run_pwsh /w/tests/pwsh/checks.ps1 -Root /w || bad "checks.ps1"
 step "PowerShell unit tests"
 run_pwsh /w/tests/pwsh/unit.ps1 -Root /w -OutDir "$OUT" || bad "unit.ps1"
 
+if [[ -f $ROOT/tests/pwsh/unit-ux.ps1 ]]; then
+	step "PowerShell unit tests (logs / status / requests / menu modules)"
+	run_pwsh /w/tests/pwsh/unit-ux.ps1 -Root /w -OutDir "$OUT" || bad "unit-ux.ps1"
+fi
+
 step "PowerShell integration tests (repo .env.example)"
 run_pwsh /w/tests/pwsh/integ.ps1 -Root /w -OutDir "$OUT/integ" || bad "integ.ps1"
 
@@ -66,6 +74,10 @@ services:
     image: alpine:3
     volumes:
       - html:/var/www/html
+  panel:
+    image: alpine:3
+    volumes:
+      - ./state:/state
   backup:
     profiles: ["tools"]
     image: alpine:3
@@ -89,7 +101,7 @@ compose_ok() {
 		bad "$label"
 	fi
 }
-for variant in linux windows empty; do
+for variant in linux windows empty panelonly; do
 	compose_ok "compose.storage.$variant.yaml" -f "$OUT/compose.min.yaml" -f "$OUT/compose.storage.$variant.yaml" --profile tools
 done
 # the Linux-path render must produce the expected mounts after merging
@@ -103,8 +115,12 @@ if merged=$(docker compose -p hvpwshtest --project-directory "$OUT" -f "$OUT/com
 			grep -qF "target: /src/storage/$slug" <<<"$merged" && bad "/src/storage/$slug must not be mounted (backup=no)"
 		fi
 		grep -qF "source: $path" <<<"$merged" || grep -qF "source: '$path'" <<<"$merged" || grep -qF "source: \"$path\"" <<<"$merged" || bad "merged config lacks source $path"
+		grep -qF "target: /stat/storage/$slug" <<<"$merged" || bad "merged config lacks panel stat mount /stat/storage/$slug"
 		: "$mode"
 	done <"$OUT/compose.storage.linux.expect"
+	for t in /stat/data /stat/backup /config/storage.conf; do
+		grep -qF "target: $t" <<<"$merged" || bad "merged config lacks panel mount $t"
+	done
 	printf '  ok   merged storage mounts\n'
 else
 	bad "merge of compose.storage.linux.yaml"
@@ -141,6 +157,23 @@ if [[ -f $ROOT/compose.yaml ]]; then
 		compose_ok "real compose.yaml + compose.acme.yaml + generated .env (acme)" \
 			--project-directory "$d" -f "$d/compose.yaml" -f "$d/compose.acme.yaml" -f "$d/compose.storage.yaml" --env-file "$d/.env"
 	fi
+fi
+
+step "state files vs. the panel's Go types"
+if [[ -d $ROOT/panel/internal/hoststate ]] && ! docker image inspect "$GO_IMAGE" >/dev/null 2>&1; then
+	docker pull -q "$GO_IMAGE" >/dev/null 2>&1 || true
+fi
+if [[ -d $ROOT/panel/internal/hoststate ]] && docker image inspect "$GO_IMAGE" >/dev/null 2>&1; then
+	mkdir -p "$OUT/gocheck/internal/hoststate" "$OUT/gocheck/cmd/statecheck"
+	cp "$ROOT/panel/go.mod" "$OUT/gocheck/"
+	for f in "$ROOT"/panel/internal/hoststate/*.go; do
+		[[ $f == *_test.go ]] || cp "$f" "$OUT/gocheck/internal/hoststate/"
+	done
+	cp "$ROOT/tests/pwsh/statecheck/main.go" "$OUT/gocheck/cmd/statecheck/"
+	docker run --rm -e GOTOOLCHAIN=local -e GOPROXY=off -e GOFLAGS=-mod=mod -e CGO_ENABLED=0 -e GOCACHE=/tmp/gocache \
+		-v "$OUT":"$OUT" -w "$OUT/gocheck" "$GO_IMAGE" go run ./cmd/statecheck "$OUT/state" || bad "state files decode (Go)"
+else
+	printf '  skip panel sources or %s not available\n' "$GO_IMAGE"
 fi
 
 step "QR page (node)"

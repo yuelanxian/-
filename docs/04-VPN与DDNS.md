@@ -146,6 +146,7 @@ curl.exe https://4.ipw.cn
 
 - **Linux：** wg-easy 管理界面的客户端列表会显示每台设备最近是否连接、收发流量。
 - **Windows：** `.\windows\hv.ps1 vpn list`（以管理员身份运行时显示"最近握手"一列）。
+- **两个平台：** 管理面板的 **VPN** 页（`https://HV_HOST:9443`）显示每台设备是否在线、最近握手时间和流量。这些数据由主机上的定时任务写入，最多有几分钟延迟（Linux 每 5 分钟，Windows 每 2 分钟）。
 
 ---
 
@@ -180,7 +181,7 @@ sudo ./hv ddns status     # 查看运行状态、当前公网 IP 和域名解析
 
 1. 生成 `secrets/ddns-go.yaml`（完整的 ddns-go 配置，包含 API 密钥，请勿外传），并在 `.env` 里写入 `HV_DDNS_ENABLED=true`、`HV_DDNS_PROVIDER`、`HV_DDNS_DOMAIN`；
 2. 启动 `ddns-go` 容器：以 `-noweb` 方式运行（**没有网页界面**），每 300 秒通过 `https://ddns.oray.com/checkip` 和 `https://4.ipw.cn` 检查一次公网 IPv4，发现变化就更新域名解析；
-3. 如果 `WG_HOST` 原来是一个 IP，会询问是否改成这个域名。
+3. 如果 `WG_HOST` 原来是空的，直接改成这个域名；原来是一个 IP 时，Linux 也会**直接**改成这个域名并提醒你，Windows 会先询问（默认"是"）。
 
 支持的 DNS 服务商（`HV_DDNS_PROVIDER`）和需要的密钥：
 
@@ -303,7 +304,7 @@ Windows 版不使用 wg-easy，而是由 `hv.ps1` 直接管理官方 WireGuard f
 
 1. 生成这台设备的密钥，写入服务端配置并重启隧道服务；
 2. 在浏览器里打开一个**本地**二维码页面（二维码在本机生成，不经过任何网络服务），用手机扫码导入；
-3. 扫完后回到 PowerShell 按回车，二维码页面文件随即被删除；
+3. 扫完后回到 PowerShell 按回车，程序询问是否删除二维码页面文件（其中含私钥），直接回车就是删除；
 4. 询问是否删除 `clients\phone-mama.conf`。**建议删除**：服务器不保存设备私钥，以后需要时用 `vpn qr` 重新生成（会换一把新密钥，旧配置随之失效，VPN 地址不变）。
 
 也可以双击桌面上的"HomeVault 管理"，在菜单里选"添加手机VPN"或"VPN设备列表"。

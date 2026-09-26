@@ -20,6 +20,8 @@ export NO_COLOR=1
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hv-unit.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
+# hv_mktemp inside the (sub-shelled) tests must not leave files in /tmp
+export TMPDIR=$TMP_ROOT
 
 # --- load the CLI modules (definitions only) -------------------------------
 HV_ENV_FILE=$TMP_ROOT/unused.env
@@ -31,6 +33,7 @@ for m in lib env compose storage backup restore firewall vpn ddns users logs doc
 	. "$HV_ROOT/scripts/$m.sh"
 done
 hv_version() { echo test; }
+hv_tmpdir_init
 
 # --- tiny assertion framework ----------------------------------------------
 _T_FAILS=0

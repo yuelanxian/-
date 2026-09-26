@@ -19,8 +19,14 @@ function Get-HvComposeProfiles {
     return $p
 }
 
+function Set-HvComposeProcessEnv {
+    # compose.yaml passes HV_VERSION to the panel from the process environment (not from .env).
+    if ($script:HvVersion) { $env:HV_VERSION = [string]$script:HvVersion }
+}
+
 function Get-HvComposeArgs {
     param([switch]$Tools, [string[]]$ExtraFiles = @())
+    Set-HvComposeProcessEnv
     $root = Get-HvRoot
     $envv = Get-HvEnv
     $files = Get-HvComposeFileList -Root $root -TlsMode (Get-HvEnvDictValue $envv 'HV_TLS_MODE' 'internal') `
@@ -41,7 +47,7 @@ function Invoke-HvCompose {
         [switch]$AllowFailure,
         [switch]$Tools,
         [string[]]$ExtraFiles = @(),
-        [AllowNull()][string]$InputText = $null
+        [AllowNull()]$InputText = $null
     )
     $a = @(Get-HvComposeArgs -Tools:$Tools -ExtraFiles $ExtraFiles) + @($Arguments)
     return (Invoke-HvNative -FilePath 'docker' -ArgumentList $a -Capture:$Capture -Quiet:$Quiet -Tee:$Tee -AllowFailure:$AllowFailure -InputText $InputText)
@@ -121,12 +127,54 @@ function Get-HvDockerInfo {
     return $info
 }
 
+function Add-HvDockerCliToPath {
+    # A fresh Docker Desktop install is not yet on this session's PATH.
+    if (-not (Test-HvWindows)) { return }
+    if (Get-Command docker -ErrorAction SilentlyContinue) { return }
+    $pf = [System.Environment]::GetEnvironmentVariable('ProgramFiles')
+    if (-not $pf) { return }
+    $bin = Join-HvPath $pf 'Docker\Docker\resources\bin'
+    if ([System.IO.File]::Exists((Join-HvPath $bin 'docker.exe'))) { $env:PATH = $env:PATH + ';' + $bin }
+}
+
+function Install-HvDockerDesktop {
+    # Offer `winget install Docker.DockerDesktop` (after confirmation). Always stops: a reboot/sign-in is needed afterwards.
+    $manual = '请先安装 Docker Desktop（https://www.docker.com/products/docker-desktop/ ，版本 ≥ 4.92），安装后启动一次并完成首次设置，看到 Engine running 后重新运行安装。'
+    if (-not (Test-HvWindows) -or -not (Get-Command winget -ErrorAction SilentlyContinue)) { Stop-Hv ('未找到 docker 命令：' + $manual) }
+    Write-HvWarn '未检测到 Docker Desktop（HomeVault 的全部服务运行在 Docker 容器中）。'
+    if (-not (Read-HvYesNo '现在用 winget 安装 Docker Desktop（Docker.DockerDesktop，约 600 MB）？' $true)) { Stop-Hv ('已取消。' + $manual) }
+    $r = Invoke-HvNative -FilePath 'winget' -ArgumentList @('install', '-e', '--id', 'Docker.DockerDesktop', '--accept-package-agreements', '--accept-source-agreements') -AllowFailure
+    if ($r.ExitCode -ne 0) { Stop-Hv ('winget 安装 Docker Desktop 失败（退出码 ' + $r.ExitCode + '）。' + $manual) }
+    Stop-Hv ('Docker Desktop 已安装。请重启电脑（或注销后重新登录），打开 Docker Desktop 完成首次设置（接受协议，登录可跳过），' +
+        '看到左下角 Engine running 后，再次运行安装（双击“一键安装”或 .\windows\hv.ps1 install）。') 3
+}
+
+function Start-HvDockerDesktop {
+    # Start Docker Desktop if it is installed but not running; waits for the engine. Returns $true when it answers.
+    param([int]$TimeoutSec = 300)
+    if (-not (Test-HvWindows)) { return $false }
+    $exe = Get-HvDockerDesktopExe
+    if (-not $exe) { return $false }
+    Write-HvInfo '正在启动 Docker Desktop，请稍候（首次启动可能需要几分钟）...'
+    try { Start-Process -FilePath $exe } catch { return $false }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        if ((Get-HvDockerInfo).Ok) { return $true }
+    }
+    return $false
+}
+
 function Assert-HvDocker {
-    # Docker Desktop running, Linux containers, Compose >= 2.24.
+    # Docker Desktop running, Linux containers, Compose >= 2.24. -OfferInstall: offer winget install when missing.
+    param([switch]$OfferInstall)
+    Add-HvDockerCliToPath
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        if ($OfferInstall) { Install-HvDockerDesktop }
         Stop-Hv '未找到 docker 命令：请先安装 Docker Desktop（https://www.docker.com/products/docker-desktop/，版本 ≥ 4.92），安装后启动一次并完成登录向导。'
     }
     $i = Get-HvDockerInfo
+    if (-not $i.Ok -and (Start-HvDockerDesktop)) { $i = Get-HvDockerInfo }
     if (-not $i.Ok) { Stop-Hv ('Docker 引擎不可用：请先启动 Docker Desktop，等待左下角显示 Engine running 后重试。（' + $i.Error + '）') }
     if ($i.OSType -and $i.OSType -ne 'linux') { Stop-Hv 'Docker Desktop 当前处于 Windows 容器模式：请在托盘图标菜单中选择“Switch to Linux containers”。' }
     if (-not $i.ComposeVersion -or (Compare-HvVersion $i.ComposeVersion '2.24.0') -lt 0) {

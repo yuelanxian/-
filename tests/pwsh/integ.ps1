@@ -105,9 +105,22 @@ Check 'storage rows' ($rows.Count -eq 2)
 $yaml = [System.IO.File]::ReadAllText((Join-Path $w 'compose.storage.yaml'))
 Check 'compose.storage.yaml' ($yaml.Contains('/mnt/hv/' + (Get-HvStorageSlug $photos)) -and $yaml.Contains('/src/storage/' + (Get-HvStorageSlug $photos)) -and -not $yaml.Contains('/src/storage/' + (Get-HvStorageSlug $movies)))
 Check 'dirs created' ((Test-Path -LiteralPath ($data + '/nextcloud-data')) -and (Test-Path -LiteralPath ($data + '/dumps')) -and (Test-Path -LiteralPath $bk))
+Check 'log dir default <data>/logs' ($e['HV_LOG_DIR'] -eq ($data + '/logs')) $e['HV_LOG_DIR']
+Check 'log retention default 7' ($e['HV_LOG_RETENTION_DAYS'] -eq '7') $e['HV_LOG_RETENTION_DAYS']
+Check 'panel port default 9443' ($e['HV_PANEL_PORT'] -eq '9443') $e['HV_PANEL_PORT']
+Check 'mirror prefixes for the panel build' ($e['HV_MIRROR_HUB'] -eq 'docker.m.daocloud.io/' -and $e['HV_MIRROR_GHCR'] -eq 'ghcr.m.daocloud.io/') ($e['HV_MIRROR_HUB'] + ' ' + $e['HV_MIRROR_GHCR'])
+Check 'panel image not mirrored' (-not $e.Contains('PANEL_IMAGE') -or $e['PANEL_IMAGE'] -eq 'homevault/panel:1.0.0') $e['PANEL_IMAGE']
+$missingSub = @(@('homevault', 'backup', 'nextcloud', 'caddy', 'containers', 'panel') | Where-Object { -not (Test-Path -LiteralPath (Join-Path ($data + '/logs') $_)) })
+Check 'log subdirectories created' ($missingSub.Count -eq 0) ($missingSub -join ',')
+Check 'state/requests/done created' (Test-Path -LiteralPath (Join-Path $w 'state/requests/done'))
+$cliLog = Join-Path ($data + '/logs') ('homevault/hv-' + (Get-Date).ToString('yyyy-MM-dd') + '.log')
+Check 'CLI log written' ((Test-Path -LiteralPath $cliLog) -and ([System.IO.File]::ReadAllText($cliLog)).Contains('hv.ps1 install')) $cliLog
+Check 'panel stat mounts' ($yaml.Contains("  panel:`n    volumes:") -and $yaml.Contains('target: /stat/data') -and $yaml.Contains('target: /stat/backup') -and
+    $yaml.Contains('target: /config/storage.conf') -and $yaml.Contains('target: /stat/storage/' + (Get-HvStorageSlug $photos)) -and $yaml.Contains('target: /stat/storage/' + (Get-HvStorageSlug $movies))) $yaml
+Check 'panel stat data source' ($yaml.Contains("source: '" + $data + "/nextcloud-data'`n        target: /stat/data`n        read_only: true"))
 
 Write-Host '-- re-install is idempotent and keeps secrets'
-$r = Invoke-Hv $w ($installArgs + @('--https-port', '8443'))
+$r = Invoke-Hv $w ($installArgs + @('--https-port', '8443', '--admin-port', '18443', '--panel-port', '19443', '--log-retention', '14'))
 Check 're-install exit 0' ($r.Code -eq 0) $r.Out
 $e2 = Read-Env $w
 foreach ($n in $sec1.Keys) { Check ('secret kept ' + $n) ([System.IO.File]::ReadAllText((Join-Path $secretsDir $n)) -eq $sec1[$n]) }
@@ -118,6 +131,15 @@ $keys = @($envLines | ForEach-Object { ($_ -split '=', 2)[0] })
 Check 'no duplicate keys' ($keys.Count -eq @($keys | Select-Object -Unique).Count)
 Check 'storage not duplicated' (@(ConvertFrom-HvStorageConf ([System.IO.File]::ReadAllText((Join-Path $w 'storage.conf')))).Count -eq 2)
 Check 'wg port kept' ($e2['WG_PORT'] -eq '43210')
+Check 'panel port + retention changed' ($e2['HV_PANEL_PORT'] -eq '19443' -and $e2['HV_LOG_RETENTION_DAYS'] -eq '14' -and $e2['HV_LOG_DIR'] -eq ($data + '/logs')) ($e2['HV_PANEL_PORT'] + ' ' + $e2['HV_LOG_RETENTION_DAYS'])
+$r = Invoke-Hv $w ($installArgs + @('--log-retention', '0'))
+Check 'invalid retention rejected' ($r.Code -eq 2 -and $r.Out.Contains('1-365')) $r.Out
+$r = Invoke-Hv $w ($installArgs + @('--https-port', '8443', '--panel-port', '8443'))
+Check 'port conflict rejected' ($r.Code -eq 2 -and $r.Out.Contains('端口冲突')) $r.Out
+$r = Invoke-Hv $w ($installArgs + @('--log-dir', 'relative/logs'))
+Check 'relative log dir rejected' ($r.Code -eq 2) $r.Out
+$e2b = Read-Env $w
+Check 'failed installs left .env untouched' ($e2b['HV_PANEL_PORT'] -eq '19443' -and $e2b['HV_LOG_RETENTION_DAYS'] -eq '14')
 
 Write-Host '-- storage add / list / remove'
 $docs = Join-Path $w 'host/docs'
@@ -140,8 +162,55 @@ $r = Invoke-Hv $w @('vpn', 'list')
 Check 'vpn needs windows' ($r.Code -ne 0 -and $r.Out.Contains('Windows')) $r.Out
 $r = Invoke-Hv $w @('backup')
 Check 'backup without docker' ($r.Code -eq 127 -and $r.Out.Contains('docker')) $r.Out
+$bsFile = Join-Path $w 'state/backup-status.json'
+$bsj = $null
+if (Test-Path -LiteralPath $bsFile) { $bsj = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($bsFile)) }
+Check 'backup-status.json written on failure' ($null -ne $bsj -and $bsj.state -eq 'failed' -and [int]$bsj.exit_code -eq 127 -and $bsj.target -eq 'local' -and $bsj.repository -eq $bk -and $bsj.schedule -eq '03:30') ([string]$bsj)
+Check 'backup-status.json log_file relative' ($null -ne $bsj -and [string]$bsj.log_file -match '^backup/backup-\d{8}-\d{6}\.log$') ([string]$bsj.log_file)
+if ($null -ne $bsj) {
+    $bl = Join-Path ($data + '/logs') ([string]$bsj.log_file)
+    Check 'backup log file written' ((Test-Path -LiteralPath $bl) -and ([System.IO.File]::ReadAllText($bl)).Contains('docker')) $bl
+}
+Check 'no snapshots.json when the repository was never opened' (-not (Test-Path -LiteralPath (Join-Path $w 'state/snapshots.json')))
+Check 'no temp status files left' ((Get-ChildItem -LiteralPath (Join-Path $w 'state') -Filter '.backup-status*' -Force -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0)
+$r = Invoke-Hv $w @('storage', 'list')
+Check 'CLI log records commands' (([System.IO.File]::ReadAllText($cliLog)).Contains('hv.ps1 storage list') -and ([System.IO.File]::ReadAllText($cliLog)).Contains('hv.ps1 backup')) ''
+Check 'CLI log has no secret values' (-not ([System.IO.File]::ReadAllText($cliLog)).Contains($sec1['nextcloud_admin_password']))
 $r = Invoke-Hv $w @('schedule-backup', '--time', '25:99')
 Check 'schedule-backup validates' ($r.Code -ne 0) $r.Out
+
+Write-Host '-- dispatch of the commands implemented by the other windows\lib modules'
+$ws = New-Work 'stubs'
+$stub = @'
+function Invoke-HvRequests { Write-Host ('STUB requests [' + ($args -join '|') + '] yes=' + $script:HvYes) }
+function Invoke-HvMaintenance { Write-Host ('STUB maintenance [' + ($args -join '|') + '] ni=' + $script:HvNonInteractive) }
+function Invoke-HvLogs { Write-Host ('STUB logs [' + ($args -join '|') + ']') }
+function Invoke-HvAndroid { Write-Host ('STUB android [' + ($args -join '|') + ']') }
+function Invoke-HvStatusUpdate { Write-Host ('STUB status-update [' + ($args -join '|') + ']') }
+function Invoke-HvMenu { Write-Host ('STUB menu [' + ($args -join '|') + ']') }
+'@
+[System.IO.File]::WriteAllText((Join-Path $ws 'windows/lib/zzz-integ-stub.ps1'), $stub)
+foreach ($case in @(
+        @(@('requests', 'process', '--yes'), 'STUB requests [process|--yes] yes=True'),
+        @(@('maintenance', '--non-interactive'), 'STUB maintenance [] ni=True'),
+        @(@('logs', 'show', 'backup', '--lines', '50'), 'STUB logs [show|backup|--lines|50]'),
+        @(@('logs'), 'STUB logs []'),
+        @(@('android', 'fetch'), 'STUB android [fetch]'),
+        @(@('status-update'), 'STUB status-update []'),
+        @(@('menu'), 'STUB menu []'))) {
+    $r = Invoke-Hv $ws $case[0]
+    Check ('dispatch ' + ($case[0] -join ' ')) ($r.Code -eq 0 -and $r.Out.Contains($case[1])) $r.Out
+}
+$r = Invoke-Hv $ws @('help')
+Check 'help lists new commands' ($r.Out.Contains('menu') -and $r.Out.Contains('logs retention') -and $r.Out.Contains('requests process') -and $r.Out.Contains('android fetch') -and $r.Out.Contains('--panel-port') -and $r.Out.Contains('--log-retention')) $r.Out
+# a checkout without those modules fails with a clear message (only the Windows CLI core files are kept)
+$wm = New-Work 'minimal'
+$core = @('common', 'env', 'secrets', 'compose', 'disks', 'storage', 'setup', 'net', 'nextcloud', 'ops', 'backup', 'firewall', 'ddns', 'doctor', 'autostart', 'vpn')
+foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $wm 'windows/lib') -Filter '*.ps1')) { if ($core -notcontains $f.BaseName) { Remove-Item -LiteralPath $f.FullName } }
+$r = Invoke-Hv $wm @('menu')
+Check 'missing module command fails clearly' ($r.Code -eq 1 -and $r.Out.Contains('Invoke-HvMenu')) $r.Out
+$r = Invoke-Hv $wm @('logs', 'app')
+Check 'logs falls back to container logs' ($r.Code -ne 0 -and $r.Out.Contains('install')) $r.Out
 
 Write-Host '-- ddns setup (credentials from environment)'
 $env:HV_DDNS_ID = 'LTAItest'; $env:HV_DDNS_SECRET = 'secret$with''quote'

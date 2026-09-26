@@ -99,7 +99,12 @@ done
 [ "$(docker inspect -f '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}}' "$(cid panel)")" = "65532:65532 true" ] || fail "panel 未以 65532 只读运行"
 ok "Nextcloud 与 panel 已就绪（panel 以 uid 65532、只读根文件系统运行，健康检查通过）"
 "${DC[@]}" exec -T caddy cat /data/caddy/pki/authorities/local/root.crt >root.crt
-{ cat root.crt; printf -- '-----BEGIN PRIVATE KEY-----\nMUST-NOT-BE-SERVED\n-----END PRIVATE KEY-----\n'; } >data/state/ca.crt
+# /ca.crt: the caddy healthcheck copies root.crt into the ca_public volume (as in compose.yaml)
+for _ in $(seq 1 30); do
+	[ "$(docker inspect -f '{{.State.Health.Status}}' "$(cid caddy)" 2>/dev/null)" = healthy ] && break
+	sleep 2
+done
+[ "$(docker inspect -f '{{.State.Health.Status}}' "$(cid caddy)")" = healthy ] || fail "caddy 健康检查（复制根证书）失败"
 "${DC[@]}" exec -T -u www-data -e OC_PASS='Normal-User-Pass-2026!' app php occ user:add --password-from-env normaluser >/dev/null
 
 echo "== socket-proxy 放行/拒绝矩阵"
@@ -183,9 +188,22 @@ api POST /api/services/panel/restart | check '"error" in d' "重启：面板自�
 R0=$(docker inspect -f '{{.State.StartedAt}}' "$(cid redis)")
 api POST /api/services/redis/restart | check 'd["ok"]' "重启：redis（经 socket-proxy）"
 [ "$R0" != "$(docker inspect -f '{{.State.StartedAt}}' "$(cid redis)")" ] || fail "redis 未重启"
-curl -sS --cacert root.crt "$PANEL/ca.crt" >ca.out
-if ! grep -q 'BEGIN CERTIFICATE' ca.out || grep -q 'PRIVATE KEY' ca.out; then fail "/ca.crt"; fi
-ok "/ca.crt 无需登录即可下载，且只包含证书"
+C0=$(docker inspect -f '{{.State.StartedAt}}' "$(cid caddy)")
+T0=$(date +%s)
+api POST /api/services/caddy/restart | check 'd["ok"]' "重启：caddy（本请求经过 caddy，面板先答复再重启）"
+[ $(($(date +%s) - T0)) -le 5 ] || fail "重启 caddy 的请求耗时 $(($(date +%s) - T0)) 秒"
+for _ in $(seq 1 30); do
+	[ "$C0" != "$(docker inspect -f '{{.State.StartedAt}}' "$(cid caddy)")" ] && curl -fsS --cacert root.crt -o /dev/null "$PANEL/healthz" 2>/dev/null && break
+	sleep 1
+done
+[ "$C0" != "$(docker inspect -f '{{.State.StartedAt}}' "$(cid caddy)")" ] || fail "caddy 未重启"
+curl -fsS --cacert root.crt -o /dev/null "$PANEL/healthz" || fail "caddy 重启后面板不可达"
+ok "caddy 已在后台重启，面板随后恢复可达"
+[ "$(curl -sS --cacert root.crt -o ca.out -w '%{http_code} %{content_type}' "$PANEL/ca.crt")" = "200 application/x-x509-ca-cert" ] || fail "/ca.crt"
+cmp -s ca.out root.crt || fail "/ca.crt 与 Caddy 本地 CA 根证书不一致"
+if grep -q 'PRIVATE KEY' ca.out; then fail "/ca.crt 含私钥"; fi
+"${DC[@]}" exec -T caddy sh -c '! ls /ca-public | grep -q key' || fail "ca_public 卷中出现了私钥文件"
+ok "/ca.crt 无需登录即可下载（Caddy 健康检查复制到 ca_public 卷的根证书，不含私钥）"
 [ "$(curl -sS --cacert root.crt -o apk.out -w '%{http_code} %{content_type}' "$PANEL/download/android")" = "200 application/vnd.android.package-archive" ] || fail "/download/android"
 cmp -s apk.out data/state/app/homevault.apk || fail "/download/android 内容不一致"
 ok "/download/android 提供 state/app/homevault.apk"
@@ -214,9 +232,15 @@ curl -sS --cacert root.crt -b "__Host-hvpanel=$C2" -H "X-CSRF-Token: $T2" -H 'Co
 ok "用户手动创建的应用密码在退出后仍然有效（不会被面板吊销）"
 NPW=$("${DC[@]}" exec -T -u www-data -e OC_PASS='Normal-User-Pass-2026!' app php occ user:auth-tokens:add --password-from-env normaluser | tail -n 1 | tr -d '\r')
 pwlogin normaluser "$NPW" | check '"管理员" in d["error"]' "非管理员的应用密码被拒绝（403）"
-for i in 1 2 3 4; do pwlogin hvadmin "wrong-$i" >/dev/null; done
+# one failure so far (normaluser); a burst of 12 PARALLEL guesses may only get 4 more checks through
+for i in $(seq 1 12); do
+	curl -sS --cacert root.crt -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' -X POST \
+		-d "{\"user\":\"hvadmin\",\"app_password\":\"wrong-$i\"}" "$PANEL/api/auth/password" >>burst.txt &
+done
+wait
+[ "$(grep -c '^401$' burst.txt)" -le 4 ] && [ "$(grep -c '^429$' burst.txt)" -ge 8 ] || fail "并发猜测绕过了登录限速：$(sort burst.txt | uniq -c | tr '\n' ' ')"
 [ "$(curl -sS --cacert root.crt -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d '{"user":"hvadmin","app_password":"x"}' "$PANEL/api/auth/password")" = 429 ] || fail "登录限速未生效"
-ok "连续失败后登录被限速（429）"
+ok "并发/连续失败后登录被限速（429；12 个并发猜测中最多 4 个到达 Nextcloud）"
 
 echo "== 退出登录 / 停机时吊销设备密码"
 python3 flow.py hvadmin 'Smoke-Admin-Pass-2026!' ok >/dev/null || fail "第二次登录失败"
@@ -227,10 +251,22 @@ curl -sS --cacert root.crt -b "__Host-hvpanel=$C3" -H "X-CSRF-Token: $T3" -H 'Co
 sleep 2
 [ "$(tokens | wc -l)" = 1 ] || fail "退出登录后设备密码未吊销：$(tokens | tr '\n' ' ')"
 ok "退出登录时吊销了该会话的设备密码"
-"${DC[@]}" stop -t 20 panel >/dev/null
-[ -z "$(tokens)" ] || fail "停机后设备密码未吊销"
-ok "优雅停机时吊销了剩余会话的设备密码"
+# stop with the compose default (10 s) while a phone is still downloading the APK slowly
+head -c 20000000 /dev/urandom >data/state/app/homevault.apk
+curl -sS --cacert root.crt --limit-rate 200k -o /dev/null "$PANEL/download/android" 2>/dev/null &
+DL=$!
+sleep 2
+"${DC[@]}" stop panel >/dev/null
+kill "$DL" 2>/dev/null || true
+wait "$DL" 2>/dev/null || true
+[ -z "$(tokens)" ] || fail "停机后设备密码未吊销（下载进行中）"
+ok "优雅停机时吊销了剩余会话的设备密码（即使仍有慢速下载进行中）"
 "${DC[@]}" start panel >/dev/null
+
+if "${DC[@]}" logs --no-log-prefix proxyrec 2>/dev/null | grep -qiE 'authorization|app:80|HTTP/1'; then
+	fail "面板把内部请求发给了 HTTP_PROXY：$("${DC[@]}" logs --no-log-prefix proxyrec | head -5)"
+fi
+ok "容器里设置了 HTTP_PROXY（Compose 注入的客户端代理）时，面板仍直连 Nextcloud，不向代理泄露应用密码"
 
 if [ "$BROWSER" = 1 ]; then
 	echo "== 浏览器测试（Playwright）"

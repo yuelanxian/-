@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata" // scratch image has no zoneinfo; TZ=Asia/Shanghai must still work
@@ -51,6 +52,9 @@ func serve() int {
 		slog.Error("configuration error", "err", err)
 		return 1
 	}
+	for _, w := range cfg.Warnings {
+		slog.Warn("configuration", "warning", w)
+	}
 	srv, err := server.New(cfg, version)
 	if err != nil {
 		slog.Error("startup failed", "err", err)
@@ -88,10 +92,21 @@ func serve() int {
 	case <-ctx.Done():
 	}
 	slog.Info("shutting down")
-	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Docker kills the container 10 s after SIGTERM (compose default). Revoke the device passwords
+	// in parallel with draining HTTP: a slow download (APK over VPN, WriteTimeout 10 min) must not
+	// use up the whole budget and leave the Login Flow app passwords valid in Nextcloud.
+	sctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	_ = hs.Shutdown(sctx)
-	srv.Shutdown(sctx)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		hctx, hcancel := context.WithTimeout(sctx, 5*time.Second)
+		defer hcancel()
+		if hs.Shutdown(hctx) != nil {
+			_ = hs.Close()
+		}
+	})
+	wg.Go(func() { srv.Shutdown(sctx) })
+	wg.Wait()
 	slog.Info("stopped")
 	return 0
 }

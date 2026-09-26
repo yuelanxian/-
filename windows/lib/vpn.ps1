@@ -117,6 +117,26 @@ function Get-HvQrPageHtml {
     return $html
 }
 
+function ConvertFrom-HvWgShowDumpText {
+    # Pure: `wg show <if> dump` text -> hashtable <public key> -> @{ Endpoint; Handshake; Rx; Tx } (for vpn list).
+    # (state\vpn-status.json for the panel is written by status.ps1 - Update-HvVpnStatusFile.)
+    param([AllowEmptyString()][string]$Text)
+    $peers = @{}
+    $first = $true
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -eq '') { continue }
+        if ($first) { $first = $false; continue }
+        $f = @($line -split "`t")
+        if ($f.Count -lt 7) { continue }
+        $hs = [int64]0; $rx = [int64]0; $tx = [int64]0
+        [void][int64]::TryParse($f[4], [ref]$hs); [void][int64]::TryParse($f[5], [ref]$rx); [void][int64]::TryParse($f[6], [ref]$tx)
+        $ep = $f[2]
+        if ($ep -eq '(none)') { $ep = '' }
+        $peers[$f[0]] = [pscustomobject]@{ Endpoint = $ep; Handshake = $hs; Rx = $rx; Tx = $tx }
+    }
+    return $peers
+}
+
 # ---------------------------------------------------------------- paths / state
 
 function Get-HvWgPaths {
@@ -269,6 +289,7 @@ function Update-HvWgTunnel {
     if (-not $ok) { Stop-Hv ('WireGuard 隧道服务未能启动：请运行 "' + $p.WireGuardExe + '" /dumplog /tail 查看日志。') }
     if (Set-HvWeakHostNow) { Write-HvOk '已为隧道网卡开启 Weak Host（VPN 客户端可访问本机局域网 IP）。' } else { Write-HvWarn '暂未能设置 Weak Host，计划任务 HomeVault-WeakHost 会在 5 分钟内重试。' }
     try { Start-ScheduledTask -TaskName $script:HvWeakHostTask -ErrorAction Stop } catch { }
+    Save-HvVpnStatusFile
 }
 
 function Set-HvWgDirAcl {
@@ -421,18 +442,18 @@ function Invoke-HvVpnQr {
 
 function Get-HvWgShowDump {
     # Latest handshake per public key (needs admin); empty hashtable on failure.
-    $map = @{}
     $p = Get-HvWgPaths
-    if (-not (Test-HvAdmin) -or -not [System.IO.File]::Exists($p.WgExe)) { return $map }
+    if (-not (Test-HvAdmin) -or -not [System.IO.File]::Exists($p.WgExe)) { return @{} }
     $r = Invoke-HvNative -FilePath $p.WgExe -ArgumentList @('show', $script:HvTunnelName, 'dump') -Capture -AllowFailure
-    if ($r.ExitCode -ne 0) { return $map }
-    $first = $true
-    foreach ($line in $r.Output) {
-        if ($first) { $first = $false; continue }
-        $f = $line -split "`t"
-        if ($f.Count -ge 7) { $map[$f[0]] = [pscustomobject]@{ Endpoint = $f[2]; Handshake = [int64]$f[4]; Rx = [double]$f[5]; Tx = [double]$f[6] } }
-    }
-    return $map
+    if ($r.ExitCode -ne 0) { return @{} }
+    return (ConvertFrom-HvWgShowDumpText ($r.Output -join "`n"))
+}
+
+function Save-HvVpnStatusFile {
+    # Refresh state\vpn-status.json for the management panel after a tunnel/peer change (status.ps1).
+    if (-not (Test-HvWindows)) { return }
+    if (-not (Get-Command -Name 'Update-HvVpnStatusFile' -CommandType Function -ErrorAction SilentlyContinue)) { return }
+    try { [void](Update-HvVpnStatusFile) } catch { Write-HvWarn ('未能更新 state\vpn-status.json：' + (Get-HvErrorMessage $_)) }
 }
 
 function Invoke-HvVpnList {

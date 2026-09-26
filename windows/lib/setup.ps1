@@ -20,6 +20,22 @@ function Test-HvPortNumber {
     return ($n -ge 1 -and $n -le 65535)
 }
 
+function Test-HvLogDirPath {
+    # Pure: absolute Windows path (D:\HomeVault\logs) or, for tests on Linux, an absolute POSIX path.
+    param([AllowEmptyString()][string]$Path)
+    return (($Path -match '^[A-Za-z]:[\\/]') -or $Path.StartsWith('/'))
+}
+
+function Invoke-HvOptionalStep {
+    # Run a function provided by another windows\lib module if present (older/partial checkouts skip it).
+    param([string]$Function, [string]$What)
+    if (-not (Get-Command -Name $Function -CommandType Function -ErrorAction SilentlyContinue)) {
+        Write-HvWarn ('跳过' + $What + '（缺少 ' + $Function + '）。')
+        return
+    }
+    try { [void](& $Function) } catch { Write-HvWarn ($What + '未完成：' + (Get-HvErrorMessage $_)) }
+}
+
 function Get-HvInstallValue {
     # First non-empty of: command-line option, current .env value, default.
     param([hashtable]$Parsed, [string]$Opt, [System.Collections.IDictionary]$Cur, [string]$Key, [string]$Default = '')
@@ -171,6 +187,7 @@ function Show-HvInstallSummary {
     Write-Host ''
     Write-Host '==================== HomeVault 安装完成 ====================' -ForegroundColor Green
     Write-Host ('  访问地址（家里和外面都用这一个）：' + $url)
+    Write-Host ('  管理面板（手机/浏览器查看状态、存储、备份、日志）：' + (Get-HvPanelUrl) + '（用 Nextcloud 管理员账号登录）')
     Write-Host ('  管理员用户名：' + (Get-HvEnvValue 'HV_ADMIN_USER' 'hvadmin'))
     if (@($Created) -contains 'nextcloud_admin_password') {
         Write-Host ('  管理员初始密码（只显示这一次，请立即保存）：' + (Read-HvSecret 'nextcloud_admin_password')) -ForegroundColor Yellow
@@ -186,6 +203,7 @@ function Show-HvInstallSummary {
         Write-Host ('  根证书：' + $CaPath)
         Write-Host ('  根证书 SHA-256 指纹：' + $fp.Fingerprint)
     }
+    Write-Host ('  日志目录：' + (Get-HvEnvLogDir) + '（保留 ' + (Get-HvEnvValue 'HV_LOG_RETENTION_DAYS' '7') + ' 天）')
     if (Test-HvTrue (Get-HvEnvValue 'HV_VPN_ENABLED' 'true')) {
         Write-Host ''
         Write-Host ('  路由器设置：只把 UDP ' + $port + ' 端口转发到 ' + $lan + '（不要开 DMZ，不要转发 443）。') -ForegroundColor Cyan
@@ -201,7 +219,8 @@ function Show-HvInstallSummary {
     Write-Host ('   ' + $n + '. 安装 Nextcloud 安卓 App（F-Droid 或 GitHub），服务器填 ' + $url + '，用“应用密码”登录。'); $n++
     Write-Host ('   ' + $n + '. App 设置 → 自动上传：打开相机文件夹，上传到 /手机备份/<设备名>；可选“仅在未计费 Wi-Fi 上传”。'); $n++
     Write-Host ('   ' + $n + '. 手机设置里把 Nextcloud 和 VPN App 的电池优化设为“无限制”，并允许自启动。'); $n++
-    Write-Host ('   ' + $n + '. 为家人创建账号：.\windows\hv.ps1 user add 名字；检查状态：.\windows\hv.ps1 doctor')
+    Write-Host ('   ' + $n + '. 为家人创建账号：.\windows\hv.ps1 user add 名字；检查状态：.\windows\hv.ps1 doctor'); $n++
+    Write-Host ('   ' + $n + '. 日常管理：双击桌面“HomeVault 管理”（或 .\windows\hv.ps1 menu）；手机管理可安装 HomeVault 安卓 App（管理面板“设置”页扫码下载）。')
     Write-Host '  详细说明：docs\05-安卓手机备份.md、docs\03-Windows部署.md'
     Write-Host '============================================================' -ForegroundColor Green
 }
@@ -212,7 +231,7 @@ function Invoke-HvCmdInstall {
         -Switches @('no-vpn', 'config-only', 'skip-autostart', 'skip-backup-init') `
         -Options @('host', 'lan-ip', 'lan-cidr', 'data-drive', 'data-dir', 'backup-target', 'backup-drive', 'backup-path', 's3-repo', 's3-options',
         'wg-host', 'wg-port', 'vpn-cidr', 'vpn-dns', 'tls-mode', 'dns-provider', 'acme-email', 'mirror', 'mirror-hub', 'mirror-ghcr',
-        'https-port', 'http-port', 'admin-port', 'admin-user', 'extra-hosts', 'bind-ip', 'timezone') `
+        'https-port', 'http-port', 'admin-port', 'panel-port', 'admin-user', 'extra-hosts', 'bind-ip', 'timezone', 'log-dir', 'log-retention') `
         -MultiOptions @('storage')
     $configOnly = Test-HvOpt $p 'config-only'
     if (-not $configOnly) { Assert-HvAdmin 'install' }
@@ -224,7 +243,7 @@ function Invoke-HvCmdInstall {
         if ($build -lt 22000) { Write-HvWarn 'Windows 10 已停止主流支持（消费者 ESU 到 2026-10-13 结束），Docker Desktop 也只支持仍在服务期内的 Windows，建议升级到 Windows 11。' }
     }
     if (-not $configOnly) {
-        $di = Assert-HvDocker
+        $di = Assert-HvDocker -OfferInstall
         if ($di.DesktopVersion -and (Compare-HvVersion $di.DesktopVersion '4.92.0') -lt 0) {
             Write-HvWarn ('Docker Desktop ' + $di.DesktopVersion + ' 低于 4.92：把磁盘镜像迁移到其他盘的功能有已知问题，建议先升级。')
         }
@@ -239,7 +258,7 @@ function Invoke-HvCmdInstall {
         if (-not [System.IO.File]::Exists($ex)) { Stop-Hv ('缺少 ' + $ex + '，仓库不完整。') }
         $cur = ConvertFrom-HvEnvText (Read-HvTextFile $ex)
         # the template's host-specific sample values are not choices of this machine
-        foreach ($k in @('HV_HOST', 'HV_LAN_IP', 'HV_LAN_CIDR', 'HV_BIND_IP', 'HV_DATA_DIR', 'HV_NC_DATA_PATH', 'HV_DUMP_DIR', 'HV_BACKUP_TARGET', 'HV_BACKUP_LOCAL_PATH', 'WG_HOST', 'WG_PORT')) {
+        foreach ($k in @('HV_HOST', 'HV_LAN_IP', 'HV_LAN_CIDR', 'HV_BIND_IP', 'HV_DATA_DIR', 'HV_NC_DATA_PATH', 'HV_DUMP_DIR', 'HV_LOG_DIR', 'HV_BACKUP_TARGET', 'HV_BACKUP_LOCAL_PATH', 'WG_HOST', 'WG_PORT')) {
             if ($cur.Contains($k)) { $cur[$k] = '' }
         }
         Write-HvInfo '首次安装：从 .env.example 生成 .env'
@@ -256,13 +275,17 @@ function Invoke-HvCmdInstall {
         if (-not $isNew -and (Get-HvEnvDictValue $cur 'HV_PLATFORM') -eq 'windows') { $bind = Get-HvEnvDictValue $cur 'HV_BIND_IP' '0.0.0.0' }
     }
     $set['HV_BIND_IP'] = $bind
-    foreach ($pp in @(@('https-port', 'HV_HTTPS_PORT', '443'), @('http-port', 'HV_HTTP_PORT', '80'), @('admin-port', 'HV_ADMIN_PORT', '8443'))) {
+    $seenPorts = @{}
+    foreach ($pp in @(@('https-port', 'HV_HTTPS_PORT', '443'), @('http-port', 'HV_HTTP_PORT', '80'), @('admin-port', 'HV_ADMIN_PORT', '8443'), @('panel-port', 'HV_PANEL_PORT', '9443'))) {
         $v = Get-HvInstallValue $p $pp[0] $cur $pp[1] $pp[2]
         if (-not (Test-HvPortNumber $v)) { Stop-Hv ('端口无效：--' + $pp[0] + ' ' + $v) 2 }
+        $v = [string][int]$v
+        if ($seenPorts.ContainsKey($v)) { Stop-Hv ('端口冲突：--' + $pp[0] + ' 与 --' + $seenPorts[$v] + ' 都是 ' + $v) 2 }
+        $seenPorts[$v] = $pp[0]
         $set[$pp[1]] = $v
     }
     if (-not $configOnly) {
-        foreach ($k in @('HV_HTTPS_PORT', 'HV_HTTP_PORT')) {
+        foreach ($k in @('HV_HTTPS_PORT', 'HV_HTTP_PORT', 'HV_ADMIN_PORT', 'HV_PANEL_PORT')) {
             $owners = @(Test-HvTcpPortListening ([int]$set[$k]))
             $foreign = @($owners | Where-Object { $_ -notmatch '^(com\.docker\.backend|wslrelay|vpnkit|com\.docker\.proxy)' })
             if ($foreign.Count -gt 0) { Stop-Hv ('TCP 端口 ' + $set[$k] + ' 已被 ' + ($foreign -join ', ') + ' 占用：请关闭该程序或使用 --https-port / --http-port 指定其他端口。') }
@@ -374,6 +397,36 @@ function Invoke-HvCmdInstall {
     $set['HV_DUMP_DIR'] = $dump
     foreach ($k in @('HV_VOL_HTML', 'HV_VOL_DB', 'HV_VOL_REDIS', 'HV_VOL_CADDY_DATA', 'HV_VOL_CADDY_CONFIG', 'HV_VOL_WGEASY')) { $set[$k] = '' }
     Write-HvOk ('Nextcloud 数据目录：' + $loc.NcData)
+
+    # ---- logs (SPEC section 14)
+    Write-HvStep '日志'
+    $defLog = $loc.Base + $sep + 'logs'
+    $logDir = Get-HvOpt $p 'log-dir' ''
+    if (-not $logDir) {
+        $logDir = Get-HvEnvDictValue $cur 'HV_LOG_DIR'
+        if ($logDir -and (Test-HvWindows) -and -not (Test-HvWindowsAbsPath $logDir)) { $logDir = '' }
+        if (-not $logDir) {
+            $logDir = $defLog
+            if (Test-HvInteractive) {
+                Write-HvInfo '日志目录保存管理命令、备份、Nextcloud、访问日志和容器日志，可以在资源管理器中直接打开查看。'
+                $logDir = Read-HvValue -Prompt '日志目录' -Default $defLog -Validate { param($v) Test-HvLogDirPath $v } -ErrorText '请输入完整路径，例如 D:\HomeVault\logs'
+            }
+        }
+    }
+    if (-not (Test-HvLogDirPath $logDir) -or ((Test-HvWindows) -and $logDir -notmatch '^[A-Za-z]:[\\/]')) { Stop-Hv ('日志目录必须是完整路径（例如 D:\HomeVault\logs）：' + $logDir) 2 }
+    if ($logDir.Length -gt 3) { $logDir = $logDir.TrimEnd('\', '/') }
+    $set['HV_LOG_DIR'] = $logDir
+    $days = Get-HvOpt $p 'log-retention' ''
+    if (-not $days) {
+        $days = Get-HvEnvDictValue $cur 'HV_LOG_RETENTION_DAYS' '7'
+        if (-not (Test-HvRetentionDays $days)) { $days = '7' }
+        if ($isNew -and (Test-HvInteractive)) {
+            $days = Read-HvValue -Prompt '日志保留天数（1-365；更早的日志每天自动删除，以后可在管理菜单或管理面板中修改）' -Default $days -Validate { param($v) Test-HvRetentionDays $v } -ErrorText '请输入 1 到 365 之间的整数'
+        }
+    }
+    if (-not (Test-HvRetentionDays $days)) { Stop-Hv ('日志保留天数必须是 1-365 的整数：' + $days) 2 }
+    $set['HV_LOG_RETENTION_DAYS'] = [string][int]([string]$days).Trim()
+    Write-HvOk ('日志目录：' + $logDir + '（保留 ' + $set['HV_LOG_RETENTION_DAYS'] + ' 天）')
     if (Test-HvWindows) {
         foreach ($letter in @((Get-HvDriveLetterFromPath $loc.Base), (Get-HvSystemDriveLetter)) | Select-Object -Unique) {
             try {
@@ -430,8 +483,8 @@ function Invoke-HvCmdInstall {
         $hub = Get-HvOpt $p 'mirror-hub' ''
         $ghcr = Get-HvOpt $p 'mirror-ghcr' ''
         if ($mirror -eq 'custom') {
-            if (-not $hub) { $hub = Read-HvValue -Prompt 'Docker Hub 镜像前缀（例如 docker.m.daocloud.io）' -Validate { param($v) $v -ne '' } }
-            if (-not $ghcr) { $ghcr = Read-HvValue -Prompt 'ghcr.io 镜像前缀（例如 ghcr.m.daocloud.io）' -Validate { param($v) $v -ne '' } }
+            if (-not $hub) { $hub = Read-HvValue -Prompt 'Docker Hub 镜像前缀（例如 docker.m.daocloud.io）' -Default ((Get-HvEnvDictValue $cur 'HV_MIRROR_HUB').TrimEnd('/')) -Validate { param($v) $v -ne '' } }
+            if (-not $ghcr) { $ghcr = Read-HvValue -Prompt 'ghcr.io 镜像前缀（例如 ghcr.m.daocloud.io）' -Default ((Get-HvEnvDictValue $cur 'HV_MIRROR_GHCR').TrimEnd('/')) -Validate { param($v) $v -ne '' } }
         }
         try { $pref = Get-HvMirrorPrefixes -Preset $mirror -Hub $hub -Ghcr $ghcr } catch { Stop-Hv $_.Exception.Message 2 }
         $mchg = Get-HvMirrorEnvChanges -Env $cur -Prefixes $pref
@@ -469,7 +522,8 @@ function Invoke-HvCmdInstall {
         Set-HvPrivateAcl -Path $bp
     }
     if ($vpnOn -and $wgDir) { [void](New-HvDirectory $wgDir) }
-    [void](New-HvDirectory (Get-HvPath 'state'))
+    Initialize-HvRuntimeDirs
+    Start-HvCliLog -LogDir $logDir -CommandText 'install'
     [void](Write-HvComposeStorageFile)
     Write-HvOk 'storage.conf / compose.storage.yaml 已就绪。'
 
@@ -486,6 +540,7 @@ function Invoke-HvCmdInstall {
         Write-HvStep '构建带 DNS 插件的 Caddy 镜像（首次需要几分钟）...'
         [void](Invoke-HvCompose -Arguments @('build', 'caddy'))
     }
+    Invoke-HvPanelBuild
     Write-HvStep '启动服务（首次需要下载镜像，可能较慢）...'
     [void](Invoke-HvCompose -Arguments @('up', '-d', '--remove-orphans'))
     [void](Wait-HvHealthy -TimeoutSec 1800)
@@ -503,6 +558,19 @@ function Invoke-HvCmdInstall {
         } catch { Write-HvWarn ('备份初始化未完成：' + (Get-HvErrorMessage $_) + '（稍后可运行 backup --init）') }
     }
 
+    # ---- daily maintenance (logs, status), panel request runner, desktop shortcut "HomeVault 管理"
+    Write-HvStep '计划任务与快捷方式'
+    # requests first: it verifies which hidden-window mode works; the maintenance task reuses it
+    Invoke-HvOptionalStep 'Register-HvRequestsTask' '管理面板请求处理任务（含 VPN 状态任务）'
+    Invoke-HvOptionalStep 'Register-HvMaintenanceTask' '每日维护计划任务（导出/清理日志）'
+    Invoke-HvOptionalStep 'Install-HvShortcuts' '桌面快捷方式“HomeVault 管理”'
+    $apk = Join-HvPath (Join-HvPath (Get-HvPath 'state') 'app') 'homevault.apk'
+    if (-not [System.IO.File]::Exists($apk) -and (Test-HvInteractive) -and (Get-Command -Name 'Invoke-HvAndroid' -CommandType Function -ErrorAction SilentlyContinue)) {
+        if (Read-HvYesNo '下载 HomeVault 安卓 App 安装包（从 GitHub Release，之后手机可在管理面板“设置”页扫码安装）？' $true) {
+            try { [void](Invoke-HvAndroid 'fetch') } catch { Write-HvWarn ('安卓 App 下载未完成：' + (Get-HvErrorMessage $_) + '（稍后可运行 .\windows\hv.ps1 android fetch）') }
+        }
+    }
+
     # ---- unattended start
     if (-not (Test-HvOpt $p 'skip-autostart')) { Invoke-HvAutostart }
 
@@ -512,5 +580,10 @@ function Invoke-HvCmdInstall {
         $ca = Export-HvCa
         if ($ca) { Show-HvCaInstructions $ca; Install-HvCaLocal $ca } else { Write-HvWarn '暂未能导出根证书，稍后运行 .\windows\hv.ps1 ca' }
     }
+    Invoke-HvOptionalStep 'Invoke-HvStatusUpdate' '状态文件（state\status.json）'
     Show-HvInstallSummary -Created $created -CaPath $ca
+    if ((Test-HvWindows) -and (Test-HvInteractive)) {
+        Write-HvInfo ('正在浏览器中打开管理面板：' + (Get-HvPanelUrl))
+        try { Start-Process -FilePath (Get-HvPanelUrl) } catch { Write-HvWarn '无法自动打开浏览器，请手动访问上面的地址。' }
+    }
 }

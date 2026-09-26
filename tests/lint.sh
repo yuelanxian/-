@@ -131,8 +131,10 @@ elif [[ $plan_rc == 0 ]] && grep -q '^SYS ' "$plan_dir/out" &&
 	grep -qF "\"logfile_audit\": \"$plan_dir/logs/audit.log\"" "$plan_dir/import.json" &&
 	grep -qF '"log_rotate_size": 52428800' "$plan_dir/import.json" &&
 	grep -qF '"log_type": "file"' "$plan_dir/import.json" &&
+	grep -qF '"logfilemode": 420' "$plan_dir/import.json" &&
+	grep -qF '"log.condition": {' "$plan_dir/import.json" && grep -qF '"admin_audit"' "$plan_dir/import.json" &&
 	grep -qF '"logtimezone": "Asia/Shanghai"' "$plan_dir/import.json"; then
-	ok "plan.php plans logfile / logfile_audit / log_rotate_size / logtimezone"
+	ok "plan.php plans logfile / logfile_audit / log_rotate_size / logfilemode / logtimezone / log.condition(admin_audit)"
 else
 	fail "plan.php log settings: rc=$plan_rc $(cat "$plan_dir/out") $(cat "$plan_dir/import.json" 2>/dev/null)"
 fi
@@ -321,7 +323,7 @@ for t in ("/logs", "/ca", "/stat/data", "/stat/backup", "/config/storage.conf"):
     if not pv.get(t, {}).get("read_only"):
         errs.append("panel: %s must be mounted read-only" % t)
 for t, v in pv.items():
-    if str(t).startswith("/stat") and not v.get("read_only"):
+    if (str(t) + "/").startswith("/stat/") and not v.get("read_only"):
         errs.append("panel: %s must be read-only" % t)
     if str(v.get("source", "")).rstrip("/").endswith(("caddy_data", "caddy-data")):
         errs.append("panel must not mount the Caddy data (CA private key)")

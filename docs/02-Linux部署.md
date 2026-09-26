@@ -95,11 +95,13 @@ docker compose version                                   # 应 ≥ 2.24
 ### 方法一（推荐）：安装时使用 `--mirror`
 
 ```bash
-sudo ./hv install --mirror custom
+sudo ./hv install --mirror daocloud      # DaoCloud 公共镜像（docker.m.daocloud.io/、ghcr.m.daocloud.io/）
+sudo ./hv install --mirror custom        # 或者自己输入前缀
 ```
 
-- `--mirror custom` 会请你分别输入 `docker.io/` 和 `ghcr.io/` 要替换成的前缀。例如 DaoCloud 公共镜像的前缀分别是 `docker.m.daocloud.io/` 和 `ghcr.m.daocloud.io/`。
-- `--mirror` 也接受内置的预设名，例如 `--mirror daocloud` 直接使用上面这组 DaoCloud 前缀；可用的预设以 `./hv help` 为准。
+- `--mirror daocloud` 直接使用 DaoCloud 公共镜像的这组前缀：`docker.m.daocloud.io/` 和 `ghcr.m.daocloud.io/`。第一次交互式安装时，安装程序也会问你要不要用它。
+- `--mirror custom` 会请你分别输入 `docker.io/` 和 `ghcr.io/` 要替换成的前缀（非交互时用 `--mirror-hub`、`--mirror-ghcr` 给出）。`--mirror none` 恢复成官方地址。
+- 管理面板在本机构建时用的 Go 构建镜像（`golang:1.26-alpine`）也会走同一个 Docker Hub 前缀。
 - 选择了镜像后，域名模式下构建 Caddy 所用的 Go 模块代理 `HV_GOPROXY` 会默认改为 `https://goproxy.cn,direct`。
 
 ### 方法二：Docker 守护进程的 `registry-mirrors`（只对 docker.io 有效）
@@ -262,7 +264,7 @@ PCR 7 对应安全启动（Secure Boot）状态。升级固件或修改安全启
 ## 5. 获取 HomeVault
 
 ```bash
-sudo git clone <仓库地址> /opt/homevault
+sudo git clone https://github.com/yuelanxian/- /opt/homevault
 cd /opt/homevault
 ./hv help
 ```
@@ -276,54 +278,68 @@ cd /opt/homevault
 ```bash
 sudo ./hv install
 # 国内网络：
-sudo ./hv install --mirror custom
+sudo ./hv install --mirror daocloud
 ```
 
 安装程序是**交互式**的，会按顺序询问下面这些问题。每个问题都有默认值，直接按回车就是接受默认值。具体措辞和顺序以屏幕上的提示为准。
 
 ### 6.1 环境预检查（自动）
 
-安装程序会检查：Docker 和 Compose 版本（Engine ≥ 28、Compose ≥ 2.24）；需要的端口（默认 80、443、8443）有没有被占用；磁盘空间是否足够；操作系统是否受支持。有 ✘ 时按提示处理后重新运行即可。
+安装程序会检查：是不是 Linux；Docker 是否在运行，Docker Engine 和 Compose 的版本（Engine ≥ 28、Compose ≥ 2.24）；`curl`、`openssl` 是否已安装。回答完下面的问题后，还会检查需要的 TCP 端口（默认 80、443、8443、9443）有没有被占用。有 ✘ 时按提示处理后重新运行即可。
+
+> 磁盘空间不会自动检查：Docker 镜像、数据库和程序文件大约需要 10–20 GB，请确认 `HV_DATA_DIR` 所在的盘（一般是系统盘）有足够空间。
 
 ### 6.2 问题清单
 
-| 询问内容 | 对应设置 | 建议 |
+| 询问内容（按顺序） | 对应设置 | 建议 |
 |---|---|---|
-| 局域网 IP 和网段（自动检测，请确认） | `HV_LAN_IP`、`HV_LAN_CIDR` | 确认是 §1.3 里固定的那个 IP，例如 `192.168.1.10` 和 `192.168.1.0/24` |
-| 访问方式：IP 模式还是域名模式 | `HV_TLS_MODE`（`internal` / `acme-dns`）、`HV_HOST` | 有域名选域名模式（手机不用装证书）；没有就选 IP 模式，`HV_HOST` 等于局域网 IP |
-| 域名模式：DNS 服务商、API 密钥、邮箱 | `HV_DNS_PROVIDER`、`HV_ACME_EMAIL`，密钥写入 `secrets/caddy-dns.env` | 服务商可选 `alidns` / `tencentcloud` / `cloudflare`。⚠️ 用只有 DNS 权限的子账号密钥。域名的 A 记录要指向**局域网 IP** |
-| 端口 | `HV_HTTPS_PORT`（443）、`HV_HTTP_PORT`（80）、`HV_ADMIN_PORT`（8443） | 没有冲突就保持默认。也可以用参数 `--https-port`、`--http-port`、`--admin-port` 指定 |
-| 硬盘表和**主数据目录** | `HV_NC_DATA_PATH` | 见 [§7](#7-硬盘角色主数据--额外存储--备份目标) |
-| 额外存储（可以添加 0 个或多个） | 写入 `storage.conf` | 见 §7 |
-| **备份目标**：本地目录或 S3 | `HV_BACKUP_TARGET`、`HV_BACKUP_LOCAL_PATH` 或 `HV_BACKUP_S3_REPO`、`HV_BACKUP_S3_OPTIONS` | 首选另一块物理硬盘；S3 的访问密钥写入 `secrets/backup.env` |
-| VPN 对外地址 | `WG_HOST` | 填 DDNS 域名，例如 `vpn.example.com`；也可以填公网 IP，但 IP 一变就连不上 |
-| VPN 端口 | `WG_PORT` | 默认在 20000–60000 之间随机选一个，**记下来**，下一步路由器要用 |
-| VPN 访问范围 | `HV_VPN_LAN_ACCESS`（`host` / `full`） | 保持 `host`（只能访问这台主机），原因见 [docs/01-架构与安全.md](01-架构与安全.md) §3.5 |
-| 是否启用 DDNS | `HV_DDNS_ENABLED` 等 | 也可以之后用 `./hv ddns setup` 设置，见 [docs/04-VPN与DDNS.md](04-VPN与DDNS.md) |
+| 本机局域网 IP（自动检测，请确认；网段自动推算） | `HV_LAN_IP`、`HV_LAN_CIDR` | 确认是 §1.3 里固定的那个 IP，例如 `192.168.1.10` 和 `192.168.1.0/24` |
+| 访问方式：输入域名 = 域名模式，留空 = IP 模式 | `HV_HOST`、`HV_TLS_MODE`（`acme-dns` / `internal`） | 有域名选域名模式（手机不用装证书）；没有就留空，`HV_HOST` 等于局域网 IP |
+| 域名模式：DNS 服务商、证书通知邮箱、API 密钥 | `HV_DNS_PROVIDER`、`HV_ACME_EMAIL`，密钥写入 `secrets/caddy-dns.env` | 服务商可选 `alidns` / `tencentcloud` / `cloudflare`。⚠️ 用只有 DNS 权限的子账号密钥。域名的 A 记录要指向**局域网 IP** |
+| 硬盘表 + **HomeVault 数据目录**（数据库、配置、日志等） | `HV_DATA_DIR` | 默认 `/srv/homevault`，放在系统盘 SSD 上即可 |
+| **Nextcloud 文件目录**（照片、视频） | `HV_NC_DATA_PATH` | 放在大容量数据盘上，例如 `/mnt/data1/nextcloud-data`，见 [§7](#7-硬盘角色主数据--额外存储--备份目标) |
+| 日志保留天数（1–365，只在第一次安装时问） | `HV_LOG_RETENTION_DAYS`（日志目录 `HV_LOG_DIR` 默认 `<数据目录>/logs`） | 默认 7 天；以后可用 `logs retention <天数>` 或管理面板修改，见 [docs/08-日常运维与升级.md](08-日常运维与升级.md) §7 |
+| **备份目标**：`local`（本机另一块硬盘）/ `s3` / `none`（暂不配置） | `HV_BACKUP_TARGET`、`HV_BACKUP_LOCAL_PATH` 或 `HV_BACKUP_S3_REPO`、`HV_BACKUP_S3_OPTIONS` | 首选另一块物理硬盘上的目录；S3 的访问密钥写入 `secrets/backup.env` |
+| 是否启用 VPN | `HV_VPN_ENABLED` | 推荐启用（外出时手机通过 VPN 回家备份） |
+| VPN 连接地址 | `WG_HOST` | 填 DDNS 域名，例如 `vpn.example.com`；也可以填公网 IP（安装程序会检测并作为默认值），但 IP 一变就连不上 |
+| VPN 可访问范围 | `HV_VPN_LAN_ACCESS`（`host` / `full`） | 保持 `host`（只能访问这台主机），原因见 [docs/01-架构与安全.md](01-架构与安全.md) §3.5 |
+| 镜像加速（只在第一次安装时问）：`none` / `daocloud` | `*_IMAGE`、`HV_MIRROR_HUB`、`HV_MIRROR_GHCR` | 中国大陆选 `daocloud`，见 [§3](#3-国内拉取镜像docker-hub-加速) |
+| 是否添加额外存储（可以添加 0 个或多个，只在第一次安装时问） | 写入 `storage.conf` | 见 [§7](#7-硬盘角色主数据--额外存储--备份目标) |
+| 是否应用主机防火墙规则 | — | 回答"是"，见 [§8](#8-主机防火墙) |
+
+- VPN 端口 `WG_PORT` **不会询问**：第一次安装时在 20000–60000 之间随机选一个，安装总结里会显示，**记下来**，下一步路由器要用。也可以用 `--wg-port` 指定。
+- 端口 `HV_HTTPS_PORT`（443）、`HV_HTTP_PORT`（80）、`HV_ADMIN_PORT`（8443）、`HV_PANEL_PORT`（9443，管理面板）**不会询问**，需要时用参数 `--https-port`、`--http-port`、`--admin-port`、`--panel-port` 指定。
+- DDNS **不在安装时设置**：装好后用 `sudo ./hv ddns setup` 设置，见 [docs/04-VPN与DDNS.md](04-VPN与DDNS.md) §3。
+- 重新运行安装时，已有的设置会作为默认值，"只在第一次安装时问"的几项会跳过（需要修改时用对应的参数，例如 `--log-retention 30`、`--mirror daocloud`）。
 
 不需要 VPN（例如只在家里局域网用）时，可以加 `--no-vpn`。
 
 ### 6.3 安装程序接下来会自动完成
 
-1. 写入 `.env`，用随机数生成 `secrets/` 里的各个密码；
-2. 创建数据目录（Nextcloud 目录的属主设为 `33:33`，即容器里的 www-data；数据目录权限为 0750）；
-3. 根据 `storage.conf` 生成 `compose.storage.yaml`；
-4. 域名模式下，构建带 DNS 插件的 Caddy 镜像；
+1. 写入 `.env`，用随机数生成 `secrets/` 里的各个密码（启用 VPN 时还有 wg-easy 管理员密码 `secrets/wg_easy_admin_password`）；
+2. 创建数据目录（Nextcloud 目录的属主设为 `33:33`，即容器里的 www-data；数据目录权限为 0750）和日志目录 `HV_LOG_DIR`；
+3. 根据 `storage.conf` 生成 `compose.storage.yaml`（额外存储的挂载，以及给管理面板统计硬盘容量用的只读挂载）；
+4. 域名模式下，构建带 DNS 插件的 Caddy 镜像；在本机从 `panel/` 源码构建管理面板镜像（第一次需要下载 Go 构建镜像，约 1–2 分钟）；
 5. 拉取镜像并启动全部服务，等待 Nextcloud 安装完成、状态变为健康；
-6. 初始化 wg-easy：设置 HomeVault 需要的防火墙钩子和默认 AllowedIPs，然后删除初始密码文件；
+6. 同步额外存储的挂载；初始化 wg-easy：设置 HomeVault 需要的防火墙钩子和默认 AllowedIPs，然后删除初始密码文件；
 7. 初始化 restic 备份仓库；
-8. 显示**安装总结**。
+8. （你确认后）应用主机防火墙规则，并安装 `homevault-firewall.service`；
+9. 安装 systemd 定时任务：每日维护（`homevault-maintenance.timer`）、管理面板状态与请求（`homevault-status.timer`、`homevault-requests.path`），配置了备份目标时还有每晚备份（`homevault-backup.timer`）。不想安装时加 `--no-systemd`；
+10. IP 模式下导出根证书到 `clients/HomeVault-CA.crt`；
+11. 显示**安装总结**。
 
 ### 6.4 安装总结：务必保存
 
 总结里会有：
 
 - 访问地址，例如 `https://192.168.1.10`；
+- 管理面板地址，例如 `https://192.168.1.10:9443`（用 Nextcloud 管理员登录，见 [docs/10-安卓管理App与管理面板.md](10-安卓管理App与管理面板.md)）；
+- 日志目录和保留天数；
 - Nextcloud 管理员用户名（默认 `hvadmin`）和**初始密码**；
-- IP 模式下：根证书的 SHA-256 指纹和导出路径；
-- **restic 备份密码**；
-- 路由器端口转发说明、VPN 管理界面地址；
-- 下一步清单，包括手机设置清单。
+- IP 模式下：根证书的保存位置（`clients/HomeVault-CA.crt`）和 SHA-256 指纹；
+- **restic 备份密码**（配置了备份目标时）；
+- VPN 管理界面地址（`https://HV_HOST:8443`，用户 `hvadmin`，密码在 `secrets/wg_easy_admin_password`）、路由器端口转发说明、手机 VPN 连接地址；
+- 下一步清单。
 
 > ⚠️ 管理员密码和 restic 密码**只显示这一次**。请马上存进密码管理器，restic 密码最好再抄一份在纸上，离线保存。
 
@@ -332,12 +348,13 @@ sudo ./hv install --mirror custom
 ```bash
 sudo ./hv install --non-interactive \
   --host 192.168.1.10 --lan-ip 192.168.1.10 \
-  --data-dir /srv/homevault \
+  --data-dir /srv/homevault --nc-data-path /mnt/data1/nextcloud-data \
+  --backup-local-path /mnt/backup/homevault-restic \
   --wg-host vpn.example.com --wg-port 34567 \
-  --tls-mode internal
+  --tls-mode internal --log-retention 7
 ```
 
-没有给出的项目会使用默认值。全部参数见 `./hv help`。
+没有给出的项目会使用 `.env` 里已有的值或默认值（非交互模式下不给 `--backup-local-path` 或 `--backup-target s3 …` 就**不会配置备份**）。全部参数见 `./hv help install`。
 
 ### 6.6 重新运行是安全的
 
@@ -402,9 +419,11 @@ sudo ./hv firewall --apply    # 应用（可重复执行）
 sudo ./hv firewall --show     # 查看
 ```
 
+安装时已经问过是否应用（回答"是"就已经生效）。这里的命令用于以后查看或重新应用。
+
 它会：
 
-1. 在 Docker 的 `DOCKER-USER` 链里挂一条 `HOMEVAULT` 链：发往 HTTP/HTTPS/管理端口的**新 TCP 连接**，来源 IPv4 不在 `HV_ALLOWED_CIDRS` 里的一律丢弃。规则由 `homevault-firewall.service` 在每次 Docker 启动后自动恢复。
+1. 在 Docker 的 `DOCKER-USER` 链里挂一条 `HOMEVAULT` 链：发往 HTTP/HTTPS/VPN 管理端口/管理面板端口（默认 80、443、8443、9443）的**新 TCP 连接**，来源 IPv4 不在 `HV_ALLOWED_CIDRS` 里的一律丢弃。规则由 `homevault-firewall.service` 在每次 Docker 启动后自动恢复。
 2. 如果装了 ufw：设置默认拒绝所有入站，**只允许局域网访问 SSH**。
 
 为什么只配 ufw 不够（Docker 发布的端口会绕过 ufw），详见 [docs/01-架构与安全.md](01-架构与安全.md) §3.4。
@@ -452,6 +471,8 @@ sudo ./hv firewall --show     # 查看
 
 7. 在 wg-easy 里为每台手机或电脑创建一个客户端，扫码导入。详见 [docs/04-VPN与DDNS.md](04-VPN与DDNS.md) 和 [docs/05-安卓手机备份.md](05-安卓手机备份.md)。
 
+8. **管理面板（可选）。** 浏览器打开 `https://HV_HOST:9443`，点"使用 Nextcloud 登录"，用 `hvadmin` 登录并授权，就能看到服务状态、硬盘、备份和日志。手机上也可以安装"HomeVault 家庭归档"App，见 [docs/10-安卓管理App与管理面板.md](10-安卓管理App与管理面板.md)。
+
 ---
 
 ## 11. 创建家庭成员账户
@@ -477,21 +498,21 @@ sudo ./hv user list
 
 ## 12. 设置定时备份
 
-安装时已经初始化了备份仓库。现在把每晚的自动备份打开：
+安装时选好了备份目标的，安装程序已经初始化了备份仓库，并安装了每晚的定时备份（systemd 定时器 `homevault-backup.timer`，时间是 `.env` 里的 `HV_BACKUP_TIME`，默认 03:30）。确认一下，或者修改时间：
 
 ```bash
-sudo ./hv schedule-backup                 # 使用 .env 中的 HV_BACKUP_TIME（默认 03:30）
-sudo ./hv schedule-backup --time 04:00    # 或指定时间
-systemctl list-timers homevault-backup.timer
+systemctl list-timers homevault-backup.timer   # 下一次运行时间
+sudo ./hv schedule-backup --time 04:00         # 改时间（同时写入 .env）；不带参数 = 按 HV_BACKUP_TIME 重新安装
 ```
 
-这会安装 systemd 定时器 `homevault-backup.timer`。它设置了 `Persistent=true`：备份时间点主机正好关着的话，下次开机后会补做一次。
+安装时加了 `--no-systemd`、或者当时还没配置备份目标的，配好后运行一次 `sudo ./hv schedule-backup` 即可。定时器设置了 `Persistent=true`：备份时间点主机正好关着的话，下次开机后会补做一次。
 
 建议现在手动做第一次完整备份。第一次数据多，会花几个小时：
 
 ```bash
 sudo ./hv backup
-journalctl -u homevault-backup.service -n 50     # 之后查看定时备份的日志
+journalctl -u homevault-backup.service -n 50     # 之后查看定时备份的运行记录
+sudo ./hv logs list                              # 每次备份的完整输出在日志目录的 backup/ 下
 ```
 
 恢复单个文件、整机灾难恢复、异地备份，见 [docs/07-备份与恢复.md](07-备份与恢复.md)。
@@ -504,7 +525,7 @@ journalctl -u homevault-backup.service -n 50     # 之后查看定时备份的�
 sudo ./hv doctor
 ```
 
-每一项会显示 ✔（正常）或 ✘（有问题），并附上处理建议。主要检查：
+每一项会显示 ✔（正常）、!（警告）或 ✘（有问题），并附上处理建议。主要检查：
 
 | 检查项 | ✘ 时怎么办 |
 |---|---|
@@ -518,6 +539,10 @@ sudo ./hv doctor
 | TLS 证书有效期 | `sudo ./hv logs caddy` 查看续期错误 |
 | `secrets/` 和 `.env` 的权限 | 按提示修正 |
 | 局域网 IP 没有变化 | 见 [docs/08-日常运维与升级.md](08-日常运维与升级.md)"更换局域网 IP" |
+| wg-easy 的 `wg0` 接口已启动、VPN 已完成初始化（启用 VPN 时） | `sudo ./hv logs wg-easy`；`sudo ./hv vpn finalize` |
+| 管理面板能打开；状态文件在更新；没有长时间未处理的面板请求 | `sudo ./hv logs panel`；`sudo ./hv status-update`；`sudo ./hv requests process` |
+| 日志目录存在、保留天数有效 | `sudo ./hv up` 会重建目录 |
+| systemd 定时任务（维护、面板状态、面板请求、备份）已启用 | 重新运行 `sudo ./hv install`（不会重新生成密码）；备份：`sudo ./hv schedule-backup` |
 
 全部 ✔ 后，部署就完成了。日常维护看 [docs/08-日常运维与升级.md](08-日常运维与升级.md)。
 
@@ -527,13 +552,16 @@ sudo ./hv doctor
 
 - **DDNS**：`sudo ./hv ddns setup`、`sudo ./hv ddns status`，见 [docs/04-VPN与DDNS.md](04-VPN与DDNS.md)。
 - **硬盘健康监控（Scrutiny）**：见 [docs/08-日常运维与升级.md](08-日常运维与升级.md)"硬盘健康"。
+- **安卓管理 App**：先运行 `sudo ./hv android fetch` 把安装包下载到服务器，再在管理面板"设置"页扫码安装，见 [docs/10-安卓管理App与管理面板.md](10-安卓管理App与管理面板.md) §4。
 
 ## 15. 常用命令速查
 
 | 命令 | 作用 |
 |---|---|
 | `sudo ./hv status` | 查看各服务状态 |
-| `sudo ./hv logs [服务名]` | 查看日志，服务名如 `app`、`caddy`、`db`、`wg-easy` |
+| `sudo ./hv logs [服务名]` | 查看容器日志，服务名如 `app`、`caddy`、`db`、`panel`、`wg-easy` |
+| `sudo ./hv logs list` / `logs show <文件或服务> [--lines N]` | 列出 / 查看日志目录里的日志文件（见 [docs/08-日常运维与升级.md](08-日常运维与升级.md) §7） |
+| `sudo ./hv logs retention [天数]` | 查看 / 修改日志保留天数（1–365） |
 | `sudo ./hv up` / `down` / `restart` | 启动 / 停止 / 重启全部服务（会自动带上正确的配置文件和 profile） |
 | `sudo ./hv occ <参数>` | 执行 Nextcloud 的 occ 命令 |
 | `sudo ./hv harden` | 重新应用安全加固并显示关键设置 |

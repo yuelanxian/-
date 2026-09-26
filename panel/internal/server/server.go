@@ -105,8 +105,8 @@ func (s *Server) Run(ctx context.Context) {
 
 // Shutdown stops login flows and revokes the app passwords of all live sessions.
 func (s *Server) Shutdown(ctx context.Context) {
-	s.flows.Shutdown()
 	var wg sync.WaitGroup
+	wg.Go(s.flows.Shutdown) // in parallel: must not delay the session revocations below
 	for _, sess := range s.sessions.DrainAll() {
 		if !sess.RevokeOnEnd {
 			continue
@@ -254,6 +254,13 @@ func (s *Server) authorize(ctx context.Context, cr *nextcloud.Credentials, ip st
 	if err != nil {
 		if errors.Is(err, nextcloud.ErrUnauthorized) {
 			return nil, &authError{http.StatusUnauthorized, "用户名或应用密码错误（请使用 Nextcloud 应用密码，而不是登录密码）"}
+		}
+		var se *nextcloud.StatusError
+		if errors.As(err, &se) && se.Status == http.StatusTooManyRequests {
+			return nil, &authError{http.StatusTooManyRequests, "Nextcloud 的防暴力破解机制暂时限制了来自你的 IP 的登录，请稍后再试"}
+		}
+		if errors.As(err, &se) && se.Status == http.StatusServiceUnavailable {
+			return nil, &authError{http.StatusServiceUnavailable, "Nextcloud 正处于维护模式（例如正在备份），请稍后再试"}
 		}
 		slog.Warn("nextcloud user check failed", "err", err)
 		return nil, &authError{http.StatusBadGateway, "无法连接 Nextcloud，请稍后重试"}

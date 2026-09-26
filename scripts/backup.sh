@@ -161,30 +161,64 @@ backup_dump_db() {
 	ok "数据库已导出：$dir/nextcloud.sql ($(human_bytes "$(stat -c %s "$dir/nextcloud.sql")"))"
 }
 
-# Write state/backup-status.json
+# Next scheduled run (ISO) when the systemd timer is installed, else empty
+backup_next_run() {
+	local t=${HV_BACKUP_TIME:-03:30} n
+	[[ -f /etc/systemd/system/homevault-backup.timer && $t =~ ^[0-9]{2}:[0-9]{2}$ ]] || return 0
+	n=$(date -d "today $t" +%s 2>/dev/null) || return 0
+	((n > $(date +%s))) || n=$(date -d "tomorrow $t" +%s 2>/dev/null) || return 0
+	date -d "@$n" -Iseconds
+}
+
+# backup_stats_json SNAPSHOTS_FILE SHORT_ID → {"files_new":…} from the snapshot summary (restic ≥ 0.17), or empty
+backup_stats_json() {
+	local file=$1 sid=$2 obj k v out='' first=1
+	[[ -s $file && $sid =~ ^[0-9a-f]{8}$ ]] || return 0
+	# one snapshot object per line (every object starts with "time")
+	obj=$(sed 's/},{"time":/}\n{"time":/g' "$file" | grep -F "\"short_id\":\"$sid\"" | head -n1) || true
+	[[ $obj == *'"summary":{'* ]] || return 0
+	obj=${obj#*'"summary":{'}
+	obj=${obj%%\}*}
+	for k in files_new files_changed data_added total_files_processed total_bytes_processed; do
+		[[ $obj =~ \"$k\":([0-9]+) ]] && v=${BASH_REMATCH[1]} || v=0
+		((first)) || out+=','
+		first=0
+		out+="\"$k\":$v"
+	done
+	printf '{%s}' "$out"
+}
+
+# backup_write_status STATE EXIT_CODE MESSAGE STARTED_EPOCH LOGREL [SNAPSHOT_SHORT_ID]
+# state/backup-status.json — canonical shape: hoststate.BackupStatus (panel/internal/hoststate/types.go)
 backup_write_status() {
-	local result=$1 code=$2 message=$3 started=$4 logrel=$5 last_ok='null' repo
-	[[ -f $HV_STATE_DIR/last-backup-ok ]] && last_ok=$(json_str "$(cat "$HV_STATE_DIR/last-backup-ok")")
+	local state=$1 code=$2 message=$3 started=$4 logrel=$5 sid=${6:-} last_ok='' repo now finished='' stats='' sched=''
+	now=$(date +%s)
+	[[ -f $HV_STATE_DIR/last-backup-ok ]] && last_ok=$(head -n1 "$HV_STATE_DIR/last-backup-ok")
 	if [[ ${HV_BACKUP_TARGET:-local} == s3 ]]; then repo=${HV_BACKUP_S3_REPO:-}; else repo=${HV_BACKUP_LOCAL_PATH:-}; fi
-	mkdir -p "$HV_STATE_DIR"
+	[[ $state == running ]] || finished=$(date -d "@$now" -Iseconds)
+	[[ -f /etc/systemd/system/homevault-backup.timer ]] && sched=${HV_BACKUP_TIME:-03:30}
+	[[ -n $sid ]] && stats=$(backup_stats_json "$HV_STATE_DIR/snapshots.json" "$sid")
 	{
-		printf '{"last_run":%s,"finished":%s,"result":%s,"exit_code":%d,"message":%s,' \
-			"$(json_str "$started")" "$(json_str "$(date -Iseconds)")" "$(json_str "$result")" "$code" "$(json_str "$message")"
-		printf '"last_ok":%s,"target":%s,"repository":%s,"log":%s,"schedule":%s}\n' \
-			"$last_ok" "$(json_str "${HV_BACKUP_TARGET:-local}")" "$(json_str "$repo")" "$(json_str "$logrel")" \
-			"$(json_str "${HV_BACKUP_TIME:-03:30}")"
-	} >"$HV_STATE_DIR/backup-status.json.tmp"
-	chmod 0644 "$HV_STATE_DIR/backup-status.json.tmp"
-	mv -f "$HV_STATE_DIR/backup-status.json.tmp" "$HV_STATE_DIR/backup-status.json"
+		printf '{"updated":%s,"state":%s,"last_run":%s,"last_finished":%s,"last_success":%s,"duration_seconds":%d,' \
+			"$(json_str "$(date -d "@$now" -Iseconds)")" "$(json_str "$state")" "$(json_str "$(date -d "@$started" -Iseconds)")" \
+			"$(json_time "$finished")" "$(json_time "$last_ok")" $((now - started))
+		printf '"message":%s,"log_file":%s,"target":%s,"repository":%s,"schedule":%s,"next_run":%s' \
+			"$(json_str "$message")" "$(json_str "$logrel")" "$(json_str "${HV_BACKUP_TARGET:-local}")" "$(json_str "$repo")" \
+			"$(json_str "$sched")" "$(json_time "$(backup_next_run)")"
+		[[ $state == running ]] || printf ',"exit_code":%d' "$code"
+		[[ -n $stats ]] && printf ',"stats":%s' "$stats"
+		printf '}\n'
+	} | state_write backup-status.json
 }
 
 backup_write_snapshots() {
-	local tmp=$HV_STATE_DIR/snapshots.json.tmp
+	local tmp=$HV_STATE_DIR/.snapshots.json.tmp
 	if restic_run -- snapshots --json --host homevault --tag homevault >"$tmp" 2>/dev/null && [[ -s $tmp ]]; then
 		chmod 0644 "$tmp"
 		mv -f "$tmp" "$HV_STATE_DIR/snapshots.json"
 	else
 		rm -f "$tmp"
+		return 1
 	fi
 }
 
@@ -268,7 +302,7 @@ backup_run() {
 }
 
 cmd_backup() {
-	local do_init=0 do_check=0 rc=0 logfile='' logrel='' started
+	local do_init=0 do_check=0 rc=0 logfile='' logrel='' started sid='' msg=''
 	while (($#)); do
 		case $1 in
 		--init) do_init=1 ;;
@@ -294,14 +328,21 @@ cmd_backup() {
 	hv_require_env
 	require_root
 	backup_configured || die "尚未配置备份目标（.env 中的 HV_BACKUP_LOCAL_PATH 或 HV_BACKUP_S3_REPO）"
-	started=$(date -Iseconds)
+	started=$(date +%s)
 	if [[ -n ${HV_LOG_DIR:-} ]]; then
 		mkdir -p "$HV_LOG_DIR/backup"
-		logrel="backup/backup-$(date +%Y%m%d-%H%M%S).log"
+		logrel="backup/backup-$(date -d "@$started" +%Y%m%d-%H%M%S).log"
 		logfile=$HV_LOG_DIR/$logrel
+		(umask 022 && : >>"$logfile")
 	else
 		logfile=/dev/null
 	fi
+	# another backup holding the lock must not be reported as "running" by this one
+	mkdir -p "$HV_STATE_DIR"
+	if ! (exec 9>>"$HV_STATE_DIR/backup.lock" && flock -n 9); then
+		die "另一个备份任务正在运行"
+	fi
+	backup_write_status running 0 "备份进行中" "$started" "$logrel"
 	set +e
 	(
 		set -e
@@ -316,14 +357,17 @@ cmd_backup() {
 	)
 	rc=${PIPESTATUS[0]}
 	set -e
-	if ((rc == 0)); then
-		backup_write_status ok 0 "备份成功" "$started" "$logrel"
-	elif ((rc == 3)); then
-		backup_write_status partial 3 "$(restic_exit_msg 3)" "$started" "$logrel"
-	else
-		backup_write_status failed "$rc" "$(restic_exit_msg "$rc")" "$started" "$logrel"
-	fi
 	backup_write_snapshots || true
+	[[ -f $logfile ]] && sid=$(grep -oE 'snapshot [0-9a-f]{8} saved' "$logfile" | tail -n1 | cut -d' ' -f2) || true
+	if ((rc == 0)); then
+		backup_write_status ok 0 "备份成功" "$started" "$logrel" "$sid"
+	elif ((rc == 3)); then
+		backup_write_status partial 3 "$(restic_exit_msg 3)" "$started" "$logrel" "$sid"
+	else
+		msg=''
+		[[ -f $logfile ]] && msg=$(sed 's/\x1b\[[0-9;]*m//g' "$logfile" | grep '✘' | tail -n1 | sed 's/^.*✘[[:space:]]*//' | cut -c1-300 || true)
+		backup_write_status failed "$rc" "${msg:-$(restic_exit_msg "$rc")}" "$started" "$logrel" "$sid"
+	fi
 	((rc == 0)) || err "备份未成功（退出码 $rc）。日志：${logfile}"
 	return "$rc"
 }

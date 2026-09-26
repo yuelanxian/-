@@ -144,6 +144,8 @@ env_defaults() {
 	: "${HV_ALLOW_PUBLIC_LINKS:=false}"
 	: "${NEXTCLOUD_IMAGE:=docker.io/library/nextcloud:34-apache}"
 	: "${RESTIC_IMAGE:=docker.io/restic/restic:0.19.1}"
+	: "${PANEL_IMAGE:=homevault/panel:1.0.0}" "${HV_MIRROR_HUB:=}" "${HV_MIRROR_GHCR:=}"
+	: "${HV_ANDROID_RELEASE_REPO:=}"
 }
 
 # ---------------------------------------------------------------------------
@@ -192,6 +194,22 @@ hv_compute_derived() {
 	fi
 }
 
+# Management panel URL (served by Caddy on HV_PANEL_PORT for HV_HOST only)
+hv_panel_url() { printf 'https://%s:%s\n' "$HV_HOST" "${HV_PANEL_PORT:-9443}"; }
+
+# Keys introduced after the first release: write them into an older .env so that compose
+# (which requires HV_LOG_DIR) and the panel get consistent values. Never changes existing values.
+hv_ensure_env_keys() {
+	local k
+	[[ -f $HV_ENV_FILE ]] || return 0
+	if [[ -z ${HV_LOG_DIR:-} && ${HV_DATA_DIR:-} == /* ]]; then
+		env_set HV_LOG_DIR "$HV_DATA_DIR/logs"
+	fi
+	for k in HV_PANEL_PORT HV_LOG_RETENTION_DAYS; do
+		env_get "$k" >/dev/null || env_set "$k" "${!k}"
+	done
+}
+
 hv_write_derived() {
 	hv_compute_derived
 	local k
@@ -209,12 +227,22 @@ hv_validate_env() {
 		err "HV_HOST 未设置"
 		rc=1
 	}
+	local -A used=()
 	for p in HV_HTTP_PORT HV_HTTPS_PORT HV_ADMIN_PORT HV_PANEL_PORT; do
 		if ! [[ ${!p} =~ ^[0-9]+$ ]] || ((${!p} < 1 || ${!p} > 65535)); then
 			err "$p 不是有效端口：${!p}"
 			rc=1
+		elif [[ -n ${used[${!p}]:-} ]]; then
+			err "$p 与 ${used[${!p}]} 使用了同一个端口 ${!p}（HTTP/HTTPS/VPN 管理/管理面板端口必须互不相同）"
+			rc=1
+		else
+			used[${!p}]=$p
 		fi
 	done
+	if ! [[ ${HV_LOG_RETENTION_DAYS:-7} =~ ^[0-9]+$ ]] || ((10#${HV_LOG_RETENTION_DAYS:-7} < 1 || 10#${HV_LOG_RETENTION_DAYS:-7} > 365)); then
+		err "HV_LOG_RETENTION_DAYS 必须是 1–365 之间的整数：${HV_LOG_RETENTION_DAYS}"
+		rc=1
+	fi
 	[[ $HV_TLS_MODE == internal || $HV_TLS_MODE == acme-dns ]] || {
 		err "HV_TLS_MODE 只能是 internal 或 acme-dns"
 		rc=1

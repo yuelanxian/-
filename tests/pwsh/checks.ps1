@@ -107,6 +107,22 @@ foreach ($f in $files) {
     if ($bad -eq 0 -and -not ($nonAscii -and -not $hasBom)) { Report-Ok $rel }
 }
 
+Write-Host '== function names (all windows\lib\*.ps1 are dot-sourced into one scope: a duplicate silently overrides)'
+$defs = @{}
+$libFiles = @(Get-ChildItem -LiteralPath (Join-Path $Root 'windows/lib') -Filter '*.ps1' -File -ErrorAction SilentlyContinue) + @(Get-Item -LiteralPath (Join-Path $Root 'windows/hv.ps1') -ErrorAction SilentlyContinue)
+$dupCount = 0
+foreach ($f in $libFiles) {
+    if ($null -eq $f) { continue }
+    $tk = $null; $er = $null
+    $a = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tk, [ref]$er)
+    foreach ($fd in $a.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+        $k = $fd.Name.ToLowerInvariant()
+        if ($defs.ContainsKey($k) -and $defs[$k] -ne $f.Name) { Report-Fail ('function ' + $fd.Name + ' is defined in both ' + $defs[$k] + ' and ' + $f.Name); $dupCount++ }
+        else { $defs[$k] = $f.Name }
+    }
+}
+if ($dupCount -eq 0) { Report-Ok ('no duplicate function names (' + $defs.Count + ' functions)') }
+
 Write-Host '== templates'
 $tpl = Join-Path $Root 'windows/templates/vpn-qr.html'
 if (-not (Test-Path -LiteralPath $tpl)) { Report-Fail 'windows/templates/vpn-qr.html missing' }

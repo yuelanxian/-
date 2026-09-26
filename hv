@@ -3,7 +3,8 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 
-HV_VERSION=0.1.0
+# exported: compose passes it to the panel (HV_VERSION: ${HV_VERSION:-})
+export HV_VERSION=1.0.0
 HV_SELF_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 HV_ROOT=$(dirname "$HV_SELF_PATH")
 HV_SELF=./hv
@@ -58,6 +59,7 @@ hv_version() { printf '%s\n' "$HV_VERSION"; }
 
 trap 'hv_run_cleanup' EXIT
 trap 'exit 130' INT TERM
+hv_tmpdir_init
 
 main() {
 	local cmd=${1:-help} a

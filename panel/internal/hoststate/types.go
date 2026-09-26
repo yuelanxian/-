@@ -127,8 +127,27 @@ func (s *BackupStatus) UnmarshalJSON(b []byte) error {
 	if p.Updated.IsZero() {
 		p.Updated = alt.Generated
 	}
+	p.Repository = stripUserinfo(p.Repository)
 	*s = BackupStatus(p)
 	return nil
+}
+
+// stripUserinfo removes "user:password@" from URL-like repository strings (s3:https://k:s@host/…)
+// so credentials written there by mistake never reach the browser.
+func stripUserinfo(repo string) string {
+	i := strings.Index(repo, "://")
+	if i < 0 {
+		return repo
+	}
+	rest := repo[i+3:]
+	end := len(rest)
+	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+		end = j
+	}
+	if at := strings.LastIndex(rest[:end], "@"); at >= 0 {
+		return repo[:i+3] + rest[at+1:]
+	}
+	return repo
 }
 
 func firstTime(ts ...FlexTime) FlexTime {

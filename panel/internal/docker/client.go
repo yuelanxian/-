@@ -5,7 +5,6 @@ package docker
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -253,8 +252,9 @@ func (c *Client) Find(ctx context.Context, service string) (*Container, error) {
 // ErrNotFound means no container exists for the requested service.
 var ErrNotFound = errors.New("docker: service container not found")
 
-// Logs returns the last `tail` lines of a container's stdout+stderr (demultiplexed),
-// limited to maxBytes of output.
+// Logs returns the last `tail` lines of a container's stdout+stderr (demultiplexed). When the
+// output exceeds maxBytes only the NEWEST maxBytes are kept (starting at a line boundary) and
+// truncated is true.
 func (c *Client) Logs(ctx context.Context, ct *Container, tail int, timestamps bool, maxBytes int64) ([]byte, bool, error) {
 	if !idRe.MatchString(ct.ID) {
 		return nil, false, errors.New("docker: invalid container id")
@@ -268,8 +268,7 @@ func (c *Client) Logs(ctx context.Context, ct *Container, tail int, timestamps b
 		return nil, false, err
 	}
 	defer resp.Body.Close()
-	var buf bytes.Buffer
-	lw := &limitWriter{w: &buf, n: maxBytes}
+	tb := &tailBuffer{max: int(maxBytes)}
 	br := bufio.NewReaderSize(resp.Body, 64<<10)
 	ctype := resp.Header.Get("Content-Type")
 	multiplexed := !ct.Tty
@@ -282,15 +281,12 @@ func (c *Client) Logs(ctx context.Context, ct *Container, tail int, timestamps b
 		multiplexed = false
 	}
 	if multiplexed {
-		err = Demux(lw, br)
+		err = Demux(tb, br)
 	} else {
-		_, err = io.Copy(lw, br)
+		_, err = io.Copy(tb, br)
 	}
-	truncated := false
-	if errors.Is(err, errLimit) {
-		truncated, err = true, nil
-	}
-	return buf.Bytes(), truncated, err
+	out, truncated := tb.Result()
+	return out, truncated, err
 }
 
 // Restart restarts a container (POST /containers/{id}/restart?t=timeout).

@@ -53,7 +53,7 @@ doctor_ports() {
 		done < <(docker port "$cid" 2>/dev/null)
 	done
 	((bad)) || doc_ok "发布的端口均为 IPv4，TCP 仅绑定在 $HV_BIND_IP"
-	for svc in app db redis; do
+	for svc in app db redis panel socket-proxy; do
 		cid=$(dc_cid "$svc")
 		[[ -n $cid && -n $(docker port "$cid" 2>/dev/null) ]] && doc_fail "$svc 不应发布任何端口"
 	done
@@ -183,7 +183,7 @@ doctor_backup() {
 }
 
 doctor_tls() {
-	local end days sni=()
+	local end days secs sni=()
 	have openssl || {
 		doc_warn "未安装 openssl，跳过证书检查"
 		return 0
@@ -195,9 +195,17 @@ doctor_tls() {
 		doc_fail "无法从 https://$HV_BIND_IP:$HV_HTTPS_PORT 获取证书"
 		return 0
 	fi
-	days=$((($(date -d "$end" +%s) - $(date +%s)) / 86400))
-	if ((days < 7)); then
-		doc_fail "TLS 证书将在 $days 天后过期（$end）"
+	secs=$(($(date -d "$end" +%s) - $(date +%s)))
+	days=$((secs / 86400))
+	if ((secs <= 0)); then
+		doc_fail "TLS 证书已过期（$end）：查看 $HV_SELF logs caddy"
+	elif [[ $HV_TLS_MODE == internal ]]; then
+		# Caddy's local CA issues short-lived (12 h) certificates and renews them automatically
+		doc_ok "TLS 证书有效（本地 CA 签发，Caddy 自动续期；当前证书到期：$end）"
+	elif ((days < 3)); then
+		doc_fail "TLS 证书将在 $days 天后过期（$end）：自动续期可能失败，查看 $HV_SELF logs caddy"
+	elif ((days < 14)); then
+		doc_warn "TLS 证书将在 $days 天后过期（$end）：Caddy 通常在到期前 30 天续期，请检查 DNS API 凭据"
 	else
 		doc_ok "TLS 证书有效，剩余 $days 天（Caddy 会自动续期）"
 	fi
@@ -243,6 +251,61 @@ doctor_network() {
 	fi
 }
 
+# Management panel (SPEC §15): reachable through Caddy, host-side status files and request runner alive
+doctor_panel() {
+	local code target age f
+	compose_services | grep -qx panel || return 0
+	if have curl; then
+		target=$HV_BIND_IP
+		[[ $target == 0.0.0.0 ]] && target=127.0.0.1
+		# liveness only (-k): the certificate itself is checked by doctor_tls
+		code=$(curl -sk --max-time 8 -o /dev/null -w '%{http_code}' --resolve "$HV_HOST:$HV_PANEL_PORT:$target" \
+			"https://$HV_HOST:$HV_PANEL_PORT/healthz" 2>/dev/null || true)
+		if [[ $code == 200 ]]; then
+			doc_ok "管理面板可访问：$(hv_panel_url)"
+		else
+			doc_fail "管理面板无法访问（HTTP ${code:-000}）：$(hv_panel_url)（查看：$HV_SELF logs panel）"
+		fi
+	fi
+	f=$HV_STATE_DIR/status.json
+	if [[ ! -f $f ]]; then
+		doc_warn "尚未生成 state/status.json（sudo $HV_SELF status-update）"
+	else
+		age=$(($(date +%s) - $(stat -c %Y "$f")))
+		if ((age > 36 * 3600)); then
+			doc_warn "state/status.json 已 $((age / 3600)) 小时未更新：每日维护任务可能未运行（systemctl status homevault-maintenance.timer）"
+		else
+			doc_ok "状态文件已更新（$((age / 60)) 分钟前）"
+		fi
+	fi
+	if [[ -n $(find "$HV_STATE_DIR/requests" -maxdepth 1 -name '*.json' -mmin +15 -print -quit 2>/dev/null) ]]; then
+		doc_warn "有管理面板请求超过 15 分钟未处理（sudo $HV_SELF requests process；systemctl status homevault-requests.path）"
+	fi
+	if [[ $(stat -c %u "$HV_STATE_DIR/requests" 2>/dev/null) != "$HV_PANEL_UID" ]]; then
+		doc_warn "state/requests 不属于管理面板用户（uid $HV_PANEL_UID），面板无法提交请求（sudo $HV_SELF up 会修复）"
+	fi
+}
+
+doctor_logs() {
+	if [[ -z ${HV_LOG_DIR:-} || ! -d $HV_LOG_DIR ]]; then
+		doc_fail "日志目录不存在：${HV_LOG_DIR:-未设置}（sudo $HV_SELF up 会创建）"
+		return 0
+	fi
+	doc_ok "日志目录：$HV_LOG_DIR（保留 $(logs_retention_days) 天）"
+	retention_valid "${HV_LOG_RETENTION_DAYS:-7}" || doc_warn "HV_LOG_RETENTION_DAYS 无效（${HV_LOG_RETENTION_DAYS}），按 7 天处理"
+	if [[ $(stat -c %u "$HV_LOG_DIR/panel" 2>/dev/null) != "$HV_PANEL_UID" ]]; then
+		doc_warn "日志目录 panel/ 不属于管理面板用户（uid $HV_PANEL_UID），面板审计日志无法写入（sudo $HV_SELF up 会修复）"
+	fi
+	if systemd_available; then
+		local u
+		for u in homevault-maintenance.timer homevault-status.timer homevault-requests.path; do
+			[[ $(systemctl is-enabled "$u" 2>/dev/null) == enabled ]] ||
+				doc_warn "$u 未启用：日志清理 / 面板状态 / 面板请求将不会自动执行（sudo $HV_SELF install 会安装）"
+		done
+	fi
+	return 0
+}
+
 cmd_doctor() {
 	hv_require_env
 	title "HomeVault 健康检查"
@@ -254,8 +317,10 @@ cmd_doctor() {
 		doctor_ports
 		[[ $(dc_state app) == healthy || $(dc_state app) == running ]] && doctor_nextcloud
 		doctor_tls
+		doctor_panel
 		doctor_network
 	fi
+	doctor_logs
 	doctor_firewall
 	doctor_disks
 	doctor_backup

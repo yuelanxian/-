@@ -88,6 +88,20 @@ func TestSubmitValidationAndDedupe(t *testing.T) {
 	if len(pending) != 0 || len(done) != 2 || done[0].Type != "backup" || done[1].State != "ok" || done[1].Finished == nil {
 		t.Fatalf("pending=%v done=%+v", pending, done)
 	}
+	// the host is running the backup (moved to done/, no result yet): pressing again must not queue a second one
+	c, dup, err := s.Submit(TypeBackup, 0, "u", "")
+	if err != nil || !dup || c.ID != a.ID {
+		t.Fatalf("running backup not deduplicated: %v %v %v", c, dup, err)
+	}
+	if pending, _ = s.Requests(10); len(pending) != 0 {
+		t.Fatalf("second backup queued: %v", pending)
+	}
+	// finished → a new request is accepted
+	must(t, os.WriteFile(filepath.Join(s.Dir, "requests", "done", a.ID+".result.json"), []byte(`{"ok":true}`), 0o644))
+	d, dup, err := s.Submit(TypeBackup, 0, "u", "")
+	if err != nil || dup || d.ID == a.ID {
+		t.Fatalf("new backup after completion: %v %v %v", d, dup, err)
+	}
 }
 
 func must(t *testing.T, err error) {
@@ -252,5 +266,39 @@ func TestDoneResultsMerged(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(pdir, "x.result.json"), []byte(`{"ok":true}`), 0o644)
 	if p, _ := s.Requests(0); len(p) != 0 {
 		t.Fatalf("pending %+v", p)
+	}
+}
+
+// A request in done/ without "created" and without a result must not look "running" forever
+// (that would also block every new backup request through the dedupe).
+func TestRunningWithoutCreatedGoesStale(t *testing.T) {
+	s := New(t.TempDir())
+	done := filepath.Join(s.Dir, "requests", "done")
+	must(t, os.MkdirAll(done, 0o755))
+	f := filepath.Join(done, "20260101T000000000Z-backup.json")
+	must(t, os.WriteFile(f, []byte(`{"type":"backup"}`), 0o644))
+	old := time.Now().Add(-7 * time.Hour)
+	must(t, os.Chtimes(f, old, old))
+	_, list := s.Requests(10)
+	if len(list) != 1 || list[0].State != "unknown" {
+		t.Fatalf("done = %+v", list)
+	}
+	if _, dup, err := s.Submit(TypeBackup, 0, "u", ""); err != nil || dup {
+		t.Fatalf("new backup blocked by a stale entry: dup=%v err=%v", dup, err)
+	}
+}
+
+func TestBackupRepositoryCredentialsStripped(t *testing.T) {
+	for in, want := range map[string]string{
+		"s3:https://AKID:SECRET@oss-cn-hangzhou.aliyuncs.com/bucket/hv": "s3:https://oss-cn-hangzhou.aliyuncs.com/bucket/hv",
+		"s3:https://oss-cn-hangzhou.aliyuncs.com/bucket/a@b":            "s3:https://oss-cn-hangzhou.aliyuncs.com/bucket/a@b",
+		"/mnt/backup/restic":    "/mnt/backup/restic",
+		"D:\\HomeVault\\backup": "D:\\HomeVault\\backup",
+	} {
+		var bs BackupStatus
+		b, _ := json.Marshal(map[string]string{"repository": in})
+		if err := json.Unmarshal(b, &bs); err != nil || bs.Repository != want {
+			t.Errorf("%q → %q (%v)", in, bs.Repository, err)
+		}
 	}
 }

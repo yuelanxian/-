@@ -54,6 +54,10 @@ func (s *Server) handleFlowStart(w http.ResponseWriter, r *http.Request) {
 		s.audit.Log("login_flow_start", false, "", ip, "rate limited")
 		return
 	}
+	// A new start from the same browser supersedes its previous flow (stops polling, frees the slot).
+	if c, err := r.Cookie(flowCookie); err == nil && c.Value != "" {
+		s.flows.Cancel(c.Value)
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	p, err := s.flows.Start(ctx, ip)
@@ -140,13 +144,22 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请输入用户名和应用密码")
 		return
 	}
+	// Reserve the attempt BEFORE asking Nextcloud: otherwise parallel requests all pass the
+	// check above while the first ones are still in flight. A successful login gives it back.
+	if !s.pwFailLimiter.Allow(ip) {
+		tooMany(w, s.pwFailLimiter.RetryAfter(ip))
+		return
+	}
+	if !s.pwGlobal.Allow("*") {
+		s.pwFailLimiter.Undo(ip)
+		tooMany(w, s.pwGlobal.RetryAfter("*"))
+		return
+	}
 	cr := nextcloud.Credentials{LoginName: req.User, AppPassword: req.AppPassword}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	u, err := s.authorize(ctx, &cr, ip)
 	if err != nil {
-		s.pwFailLimiter.Allow(ip)
-		s.pwGlobal.Allow("*")
 		s.audit.Log("login", false, req.User, ip, "app password: "+err.Error())
 		status := http.StatusUnauthorized
 		var ae *authError
@@ -157,6 +170,7 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pwFailLimiter.Reset(ip)
+	s.pwGlobal.Undo("*")
 	// A user-supplied app password is not revoked on logout (it may be used elsewhere).
 	sess := s.sessions.Create(u.ID, u.DisplayName, cr, false, "app-password", ip)
 	setCookie(w, sessionCookie, sess.ID, s.cfg.SessionTTL)

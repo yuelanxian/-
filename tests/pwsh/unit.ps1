@@ -238,10 +238,23 @@ $linuxConf = @"
 it's|/tmp/hv-test/it's dir|ro|no|@family
 影视|/tmp/hv-test/movies|ro|yes|alice,bob
 "@
-Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.linux.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows @(ConvertFrom-HvStorageConf $linuxConf))
-Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.windows.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows $rows)
+$linuxRows = @(ConvertFrom-HvStorageConf $linuxConf)
+$linuxPanel = @(Get-HvPanelStatMounts -Rows $linuxRows -StorageConfPath '/tmp/hv-test/storage.conf' -NcDataPath '/tmp/hv-test/nc-data' -BackupPath '/tmp/hv-test/backup')
+Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.linux.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows $linuxRows -PanelMounts $linuxPanel)
+$winPanel = @(Get-HvPanelStatMounts -Rows $rows -StorageConfPath 'C:\HomeVault\storage.conf' -NcDataPath 'D:\HomeVault\nextcloud-data' -BackupPath 'E:\HomeVault-Backup\restic')
+Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.windows.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows $rows -PanelMounts $winPanel)
 Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.empty.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows @())
-$slugList = @(ConvertFrom-HvStorageConf $linuxConf) | ForEach-Object { $_.Slug + "`t" + $_.Path + "`t" + $_.Mode + "`t" + $_.Backup }
+Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.panelonly.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows @() -PanelMounts @(Get-HvPanelStatMounts -NcDataPath 'D:\HomeVault\nextcloud-data'))
+Assert-Eq 'panel stat targets' ('/config/storage.conf|/stat/data|/stat/backup|/stat/storage/' + $rows[0].Slug + '|/stat/storage/' + $rows[1].Slug) (($winPanel | ForEach-Object { $_.Target }) -join '|')
+Assert-Eq 'panel stat vector (D:\Photos -> sea173462)' '/stat/storage/sea173462' $winPanel[3].Target
+Assert-Eq 'panel stat without backup/conf' '/stat/data' ((@(Get-HvPanelStatMounts -NcDataPath 'D:\x') | ForEach-Object { $_.Target }) -join '|')
+$wy = ConvertTo-HvComposeStorageYaml -Rows $rows -PanelMounts $winPanel
+Assert-True 'yaml panel section' ($wy.Contains("  panel:`n    volumes:`n"))
+Assert-True 'yaml panel stat data ro' ($wy.Contains("source: 'D:\HomeVault\nextcloud-data'`n        target: /stat/data`n        read_only: true"))
+Assert-True 'yaml panel storage.conf' ($wy.Contains("target: /config/storage.conf`n        read_only: true"))
+Assert-True 'yaml panel storage ro even if rw' ($wy.Contains("target: /stat/storage/" + $rows[0].Slug + "`n        read_only: true"))
+Assert-True 'yaml panel only' ((ConvertTo-HvComposeStorageYaml -Rows @() -PanelMounts @(Get-HvPanelStatMounts -NcDataPath 'D:\x')) -match "services:`n  panel:`n")
+$slugList = $linuxRows | ForEach-Object { $_.Slug + "`t" + $_.Path + "`t" + $_.Mode + "`t" + $_.Backup }
 Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.linux.expect') -Content (($slugList -join "`n") + "`n")
 
 Section 'files_external plan'
@@ -375,13 +388,35 @@ Assert-Eq 'backup age invalid' $null (Get-HvBackupAgeHours 'garbage' $now)
 Assert-True 'restore overlay rw' ((New-HvRestoreOverlay).Contains('${HV_NC_DATA_PATH}:/src/nextcloud-data') -and -not (New-HvRestoreOverlay).Contains(':ro'))
 Write-HvTextFile -Path (Join-Path $OutDir 'compose.restore.yaml') -Content (New-HvRestoreOverlay)
 
+Section 'restore --full database'
+$sql = New-HvRestoreDbSql -User 'oc_hvadmin' -Password "p'w" -Name 'nextcloud'
+$sqlExpected = @(
+    'DO $hv$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = ''oc_hvadmin'') THEN CREATE ROLE "oc_hvadmin" LOGIN PASSWORD ''p''''w''; ELSE ALTER ROLE "oc_hvadmin" WITH LOGIN PASSWORD ''p''''w''; END IF; END$hv$;',
+    'DROP DATABASE IF EXISTS "nextcloud" WITH (FORCE);',
+    'CREATE DATABASE "nextcloud" OWNER "oc_hvadmin";') -join "`n"
+Assert-Eq 'restore sql (role + db)' ($sqlExpected + "`n") $sql
+Assert-Eq 'restore sql for the superuser itself' ("DROP DATABASE IF EXISTS `"nextcloud`" WITH (FORCE);`nCREATE DATABASE `"nextcloud`" OWNER `"nextcloud`";`n") (New-HvRestoreDbSql -User 'nextcloud' -Password 'x' -Name 'nextcloud')
+Assert-Throws 'restore sql rejects odd role names' { New-HvRestoreDbSql -User 'x"; DROP' -Password '' -Name 'nextcloud' } '*格式异常*'
+$dbc = ConvertFrom-HvDbConfigOutput -Lines @('Some PHP warning', 'oc_hvadmin', 'secretPW', "nextcloud`r")
+Assert-Eq 'db config from php output' 'oc_hvadmin|secretPW|nextcloud' ($dbc.User + '|' + $dbc.Password + '|' + $dbc.Name)
+Assert-Throws 'db config incomplete' { ConvertFrom-HvDbConfigOutput -Lines @('', 'x', '') } '*config.php*'
+$dumpOk = Join-Path $OutDir 'dump-ok.sql'
+Write-HvTextFile -Path $dumpOk -Content (('-- x' + "`n") * 3000 + "--`n-- PostgreSQL database dump complete`n--`n")
+$dumpBad = Join-Path $OutDir 'dump-bad.sql'
+Write-HvTextFile -Path $dumpBad -Content "--`n-- PostgreSQL database dump`n--`nCREATE TABLE x (a int);`n"
+Assert-True 'dump complete' (Test-HvDumpComplete $dumpOk)
+Assert-True 'dump truncated' (-not (Test-HvDumpComplete $dumpBad))
+
 # ------------------------------------------------------------------ firewall / doctor / misc
 Section 'firewall / doctor / misc'
 $fe = [ordered]@{ HV_HTTP_PORT = '80'; HV_HTTPS_PORT = '443'; HV_LAN_CIDR = '192.168.1.0/24'; HV_VPN_ENABLED = 'true'; HV_VPN_CIDR = '10.99.77.0/24'; WG_PORT = '43210' }
 $specs = @(Get-HvFirewallRuleSpecs -Env $fe)
 Assert-Eq 'fw rule names' 'HomeVault-HTTPS|HomeVault-Block-Other|HomeVault-Block-IPv6|HomeVault-WireGuard' (($specs | ForEach-Object { $_.Name }) -join '|')
 Assert-Eq 'fw https remote' '192.168.1.0/24|10.99.77.0/24' ($specs[0].RemoteAddress -join '|')
-Assert-Eq 'fw ports' '80|443' ($specs[0].LocalPort -join '|')
+Assert-Eq 'fw ports (http, https, admin, panel)' '80|443|8443|9443' ($specs[0].LocalPort -join '|')
+Assert-Eq 'fw block covers panel port' '80|443|8443|9443' ($specs[1].LocalPort -join '|')
+$fe2 = [ordered]@{ HV_HTTP_PORT = '80'; HV_HTTPS_PORT = '443'; HV_ADMIN_PORT = '443'; HV_PANEL_PORT = '19443'; HV_LAN_CIDR = '192.168.1.0/24'; HV_VPN_ENABLED = 'false' }
+Assert-Eq 'fw ports dedupe + custom panel port' '80|443|19443' ((@(Get-HvFirewallRuleSpecs -Env $fe2))[0].LocalPort -join '|')
 Assert-Eq 'fw block complement (loopback excluded)' '0.0.0.0-10.99.76.255|10.99.78.0-126.255.255.255|128.0.0.0-192.168.0.255|192.168.2.0-255.255.255.255' ($specs[1].RemoteAddress -join '|')
 Assert-Eq 'fw wg port' '43210' ($specs[3].LocalPort -join '|')
 $fe['HV_VPN_ENABLED'] = 'false'
@@ -420,6 +455,143 @@ Assert-Eq 'legacy native empty' '""' (ConvertTo-HvNativeArg -Arg '' -Legacy $tru
 Assert-Eq 'modern native passthrough' 'd"e' (ConvertTo-HvNativeArg -Arg 'd"e' -Legacy $false)
 Assert-Eq 'json slice' '{"a":1}' (Get-HvJsonSlice "warn`n{`"a`":1}`ntrailer")
 Assert-Eq 'env file text' "A=1`nB='x y'`n" (ConvertTo-HvEnvFileText ([ordered]@{ A = '1'; B = 'x y' }))
+
+# ------------------------------------------------------------------ JSON / time / logs
+Section 'JSON writer'
+$obj = [ordered]@{ s = '中文 "q" <x>'; n = [int64]812345678901; i = 3; d = 662.5; b = $true; f = $false; z = $null; e = @(); h = [ordered]@{}; a = @(1, 'two', $null); o = [ordered]@{ k = 'v' }; p = [pscustomobject]@{ x = 1 } }
+$js = ConvertTo-HvJson $obj
+$back = ConvertFrom-Json -InputObject $js
+Assert-Eq 'json string' '中文 "q" <x>' $back.s
+Assert-Eq 'json int64' '812345678901' ([string]$back.n)
+Assert-Eq 'json double' '662.5' ([string]$back.d)
+Assert-Eq 'json bool' $true $back.b
+Assert-Eq 'json null' $null $back.z
+Assert-Eq 'json nested' 'v' $back.o.k
+Assert-Eq 'json pscustomobject' '1' ([string]$back.p.x)
+Assert-True 'json empty array' ($js.Contains('"e": []'))
+Assert-True 'json empty object' ($js.Contains('"h": {}'))
+Assert-True 'json key order kept' ($js.IndexOf('"s"') -lt $js.IndexOf('"n"') -and $js.IndexOf('"o"') -lt $js.IndexOf('"p"'))
+Assert-Eq 'json compact' '{"a":[1,2],"b":"x"}' (ConvertTo-HvJson -Value ([ordered]@{ a = @(1, 2); b = 'x' }) -Indent '')
+Assert-Eq 'json single-element array stays array' '[5]' (ConvertTo-HvJson -Value @(5) -Indent '')
+Assert-Eq 'json NaN is null' 'null' (ConvertTo-HvJson ([double]::NaN))
+Assert-Eq 'json invariant decimal point' '0.25' (ConvertTo-HvJson 0.25)
+$utc = [datetime]::new(2026, 9, 26, 3, 30, 0, [System.DateTimeKind]::Utc)
+Assert-Eq 'iso time utc' '2026-09-26T03:30:00+00:00' (Format-HvIsoTime $utc)
+Assert-True 'iso time local has offset' ((Format-HvIsoTime (Get-Date)) -match '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$')
+Assert-Eq 'json datetime' '"2026-09-26T03:30:00+00:00"' (ConvertTo-HvJson $utc)
+$jf = Join-Path $OutDir 'json-test/x.json'
+Write-HvJsonFile -Path $jf -Value ([ordered]@{ a = 1 })
+Write-HvJsonFile -Path $jf -Value ([ordered]@{ a = 2 })
+Assert-Eq 'json file replaced atomically' "{`n  `"a`": 2`n}`n" ([System.IO.File]::ReadAllText($jf))
+Assert-Eq 'json file no temp left' 1 @(Get-ChildItem -LiteralPath (Split-Path -Parent $jf) -Force).Count
+Assert-True 'json file no BOM' ([System.IO.File]::ReadAllBytes($jf)[0] -eq 123)
+
+Section 'logs / env defaults'
+Assert-Eq 'cli log path windows' 'D:\HomeVault\logs\homevault\hv-2026-09-26.log' (Get-HvCliLogPath -LogDir 'D:\HomeVault\logs\' -Date $utc)
+Assert-Eq 'cli log path posix' '/srv/hv/logs/homevault/hv-2026-09-26.log' (Get-HvCliLogPath -LogDir '/srv/hv/logs' -Date $utc)
+Assert-Eq 'cli log path empty' '' (Get-HvCliLogPath -LogDir '' -Date $utc)
+Assert-True 'retention 7' (Test-HvRetentionDays '7')
+Assert-True 'retention 365' (Test-HvRetentionDays ' 365 ')
+Assert-True 'retention 0 invalid' (-not (Test-HvRetentionDays '0'))
+Assert-True 'retention 366 invalid' (-not (Test-HvRetentionDays '366'))
+Assert-True 'retention text invalid' (-not (Test-HvRetentionDays 'abc'))
+Assert-True 'retention empty invalid' (-not (Test-HvRetentionDays ''))
+Assert-Eq 'default log dir from data dir' 'D:\HomeVault\logs' (Get-HvDefaultLogDir ([ordered]@{ HV_DATA_DIR = 'D:\HomeVault' }))
+Assert-Eq 'default log dir from nc data' 'E:\HV\logs' (Get-HvDefaultLogDir ([ordered]@{ HV_NC_DATA_PATH = 'E:\HV\nextcloud-data' }))
+Assert-Eq 'default log dir posix' '/tmp/x/logs' (Get-HvDefaultLogDir ([ordered]@{ HV_DATA_DIR = '/tmp/x/' }))
+Assert-Eq 'default log dir none' '' (Get-HvDefaultLogDir ([ordered]@{}))
+$dflt = Get-HvEnvDefaults ([ordered]@{ HV_PLATFORM = 'windows'; HV_DATA_DIR = 'D:\HomeVault' })
+Assert-Eq 'env defaults for an old .env' 'HV_LOG_DIR=D:\HomeVault\logs;HV_LOG_RETENTION_DAYS=7;HV_PANEL_PORT=9443' ((@($dflt.Keys) | ForEach-Object { $_ + '=' + $dflt[$_] }) -join ';')
+$dflt = Get-HvEnvDefaults ([ordered]@{ HV_PLATFORM = 'windows'; HV_DATA_DIR = 'D:\HomeVault'; HV_LOG_DIR = 'F:\logs'; HV_LOG_RETENTION_DAYS = '30'; HV_PANEL_PORT = '19443' })
+Assert-Eq 'env defaults keep user values' 0 $dflt.Count
+$dflt = Get-HvEnvDefaults ([ordered]@{ HV_PLATFORM = 'windows'; HV_DATA_DIR = 'D:\HomeVault'; HV_LOG_DIR = '/srv/homevault/logs'; HV_LOG_RETENTION_DAYS = '999'; HV_PANEL_PORT = '9443' })
+Assert-Eq 'env defaults fix template path + bad retention' 'HV_LOG_DIR=D:\HomeVault\logs;HV_LOG_RETENTION_DAYS=7' ((@($dflt.Keys) | ForEach-Object { $_ + '=' + $dflt[$_] }) -join ';')
+Assert-Eq 'log subdirs' 'homevault|backup|nextcloud|caddy|containers|panel' ((Get-HvLogSubdirs) -join '|')
+Assert-True 'log dir path windows' (Test-HvLogDirPath 'D:\HomeVault\logs')
+Assert-True 'log dir path relative rejected' (-not (Test-HvLogDirPath 'logs'))
+
+Section 'mirror env keys'
+$ch = Get-HvMirrorEnvChanges -Env ([ordered]@{ PANEL_IMAGE = 'homevault/panel:1.0.0'; SOCKET_PROXY_IMAGE = 'docker.io/linuxserver/socket-proxy:3.4.5-r0-ls99' }) -Prefixes (Get-HvMirrorPrefixes 'daocloud')
+Assert-Eq 'mirror hub env (trailing slash)' 'docker.m.daocloud.io/' $ch['HV_MIRROR_HUB']
+Assert-Eq 'mirror ghcr env' 'ghcr.m.daocloud.io/' $ch['HV_MIRROR_GHCR']
+Assert-Eq 'mirror panel image untouched' 'homevault/panel:1.0.0' $ch['PANEL_IMAGE']
+Assert-Eq 'mirror socket-proxy' 'docker.m.daocloud.io/linuxserver/socket-proxy:3.4.5-r0-ls99' $ch['SOCKET_PROXY_IMAGE']
+$ch = Get-HvMirrorEnvChanges -Env ([ordered]@{ NEXTCLOUD_IMAGE = 'docker.m.daocloud.io/library/nextcloud:34-apache' }) -Prefixes (Get-HvMirrorPrefixes 'none')
+Assert-Eq 'mirror none clears env' '|' ($ch['HV_MIRROR_HUB'] + '|' + $ch['HV_MIRROR_GHCR'])
+$cp = Get-HvMirrorPrefixes -Preset 'custom' -Hub 'hub.example.com/' -Ghcr 'ghcr.example.com'
+Assert-Eq 'mirror custom env' 'hub.example.com/|ghcr.example.com/' ($cp.EnvHub + '|' + $cp.EnvGhcr)
+Assert-Throws 'mirror custom rejects scheme' { Get-HvMirrorPrefixes -Preset 'custom' -Hub 'https://hub.example.com' -Ghcr 'g.example.com' } '*http*'
+
+# ------------------------------------------------------------------ backup status files (canonical shapes)
+Section 'backup status'
+$snapJson = '[{"time":"2026-09-25T03:30:01.123456789+08:00","tree":"t","paths":["/src/dumps"],"hostname":"homevault","tags":["homevault"],"id":"aaa","short_id":"aaa1","summary":{"files_new":1,"files_changed":2,"data_added":300,"total_files_processed":10,"total_bytes_processed":4000}},' +
+'{"time":"2026-09-26T03:30:05.987654321+08:00","tree":"t","paths":["/src/dumps"],"hostname":"homevault","tags":["homevault"],"id":"bbb","short_id":"bbb1","summary":{"backup_start":"2026-09-26T03:30:05.9+08:00","files_new":12,"files_changed":3,"files_unmodified":5,"data_added":104857600,"total_files_processed":120000,"total_bytes_processed":812345678901}}]'
+$st = Get-HvLatestSnapshotStats -Json $snapJson
+Assert-Eq 'stats from newest snapshot' 'files_new=12;files_changed=3;data_added=104857600;total_files_processed=120000;total_bytes_processed=812345678901' ((@($st.Keys) | ForEach-Object { $_ + '=' + $st[$_] }) -join ';')
+$nb = [datetime]::new(2026, 9, 25, 19, 0, 0, [System.DateTimeKind]::Utc)
+Assert-True 'stats kept when snapshot is new' ($null -ne (Get-HvLatestSnapshotStats -Json $snapJson -NotBefore $nb))
+Assert-Eq 'stats dropped when snapshot is older than the run' $null (Get-HvLatestSnapshotStats -Json $snapJson -NotBefore $nb.AddDays(1))
+Assert-Eq 'stats none without summary' $null (Get-HvLatestSnapshotStats -Json '[{"time":"2026-09-26T03:30:05Z","id":"x"}]')
+Assert-Eq 'stats empty list' $null (Get-HvLatestSnapshotStats -Json '[]')
+Assert-Eq 'stats garbage' $null (Get-HvLatestSnapshotStats -Json 'Fatal: repository does not exist')
+Assert-Eq 'restic time 9 digits' '2026-09-25T19:30:05Z' ((ConvertFrom-HvResticTime '2026-09-26T03:30:05.987654321+08:00').ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"))
+Assert-Eq 'restic time invalid' $null (ConvertFrom-HvResticTime 'nope')
+$now2 = [datetime]::new(2026, 9, 26, 10, 0, 0)
+Assert-Eq 'next daily run tomorrow' '2026-09-27 03:30' ((Get-HvNextDailyRun '03:30' $now2).ToString('yyyy-MM-dd HH:mm'))
+Assert-Eq 'next daily run today' '2026-09-26 23:05' ((Get-HvNextDailyRun '23:05' $now2).ToString('yyyy-MM-dd HH:mm'))
+Assert-Eq 'next daily run invalid' $null (Get-HvNextDailyRun '24:00' $now2)
+Assert-Eq 'repository local' 'E:\HomeVault-Backup\restic' (Get-HvRepositoryDisplay ([ordered]@{ HV_BACKUP_TARGET = 'local'; HV_BACKUP_LOCAL_PATH = 'E:\HomeVault-Backup\restic' }))
+Assert-Eq 'repository s3 without credentials' 's3:https://oss.example.com/b/hv' (Get-HvRepositoryDisplay ([ordered]@{ HV_BACKUP_TARGET = 's3'; HV_BACKUP_S3_REPO = 's3:https://AK:SK@oss.example.com/b/hv' }))
+Assert-Eq 'backup log rel path' 'backup/backup-20260926-033000.log' (Get-HvBackupLogRelPath ([datetime]::new(2026, 9, 26, 3, 30, 0)))
+Assert-Eq 'relative log path windows' 'backup/backup-1.log' (Get-HvPathRelativeTo -Dir 'D:\HomeVault\logs\' -File 'd:\HomeVault\logs\backup\backup-1.log')
+Assert-Eq 'relative log path mixed separators' 'backup/x.log' (Get-HvPathRelativeTo -Dir 'D:/HomeVault/logs' -File 'D:\HomeVault\logs\backup\x.log')
+Assert-Eq 'relative log path posix' 'backup/x.log' (Get-HvPathRelativeTo -Dir '/srv/hv/logs' -File '/srv/hv/logs/backup/x.log')
+Assert-Eq 'relative log path outside' '' (Get-HvPathRelativeTo -Dir 'D:\HomeVault\logs' -File 'D:\HomeVault\logs2\x.log')
+Assert-Eq 'relative log path empty dir' '' (Get-HvPathRelativeTo -Dir '' -File 'D:\x.log')
+$benv = [ordered]@{ HV_BACKUP_TARGET = 'local'; HV_BACKUP_LOCAL_PATH = 'E:\HomeVault-Backup\restic'; HV_BACKUP_TIME = '03:30' }
+$t0 = [datetime]::new(2026, 9, 26, 3, 30, 0, [System.DateTimeKind]::Utc)
+$bsOk = New-HvBackupStatus -Env $benv -State 'ok' -Started $t0 -Now $t0.AddSeconds(662) -Finished $t0.AddSeconds(662) -LastSuccess '2026-09-26T03:41:02+00:00' `
+    -Message '备份成功' -LogFile 'backup/backup-20260926-033000.log' -NextRun $t0.AddDays(1) -ExitCode 0 -Stats $st
+Assert-Eq 'backup status keys' 'updated|state|last_run|last_finished|duration_seconds|last_success|message|log_file|target|repository|schedule|next_run|exit_code|stats' ((@($bsOk.Keys)) -join '|')
+Assert-Eq 'backup status duration' '662' ([string]$bsOk['duration_seconds'])
+Assert-Eq 'backup status times' '2026-09-26T03:30:00+00:00|2026-09-26T03:41:02+00:00|2026-09-27T03:30:00+00:00' ($bsOk['last_run'] + '|' + $bsOk['last_finished'] + '|' + $bsOk['next_run'])
+$bsRun = New-HvBackupStatus -Env $benv -State 'running' -Started $t0 -Now $t0
+Assert-Eq 'running status keys' 'updated|state|last_run|last_finished|duration_seconds|last_success|message|log_file|target|repository|schedule' ((@($bsRun.Keys)) -join '|')
+Assert-True 'running: null finished / success' ($null -eq $bsRun['last_finished'] -and $null -eq $bsRun['last_success'])
+$bsJson = ConvertTo-HvJson $bsOk
+$bsBack = ConvertFrom-Json -InputObject $bsJson
+Assert-Eq 'backup status json stats' '12' ([string]$bsBack.stats.files_new)
+Assert-Eq 'backup status json exit code' '0' ([string]$bsBack.exit_code)
+Write-HvTextFile -Path (Join-Path $OutDir 'state/backup-status.json') -Content ($bsJson + "`n")
+Write-HvTextFile -Path (Join-Path $OutDir 'state/snapshots.json') -Content $snapJson
+Write-HvTextFile -Path (Join-Path $OutDir 'state/backup-status-running.json') -Content ((ConvertTo-HvJson $bsRun) + "`n")
+Write-HvTextFile -Path (Join-Path $OutDir 'state/backup-status-failed.json') -Content ((ConvertTo-HvJson (New-HvBackupStatus -Env $benv -State 'failed' -Started $t0 -Now $t0.AddMinutes(1) -Finished $t0.AddMinutes(1) -Message '备份目录不可用' -ExitCode 1)) + "`n")
+# field names must be the json tags of the Go types (canonical contract)
+$typesGo = Join-Path $Root 'panel/internal/hoststate/types.go'
+if (Test-Path -LiteralPath $typesGo) {
+    $goText = [System.IO.File]::ReadAllText($typesGo)
+    function Get-GoJsonTags { param([string]$Text, [string]$Struct)
+        $m = [regex]::Match($Text, '(?s)type ' + $Struct + ' struct \{(.*?)\n\}')
+        return @([regex]::Matches($m.Groups[1].Value, 'json:"([a-z_]+)') | ForEach-Object { $_.Groups[1].Value })
+    }
+    $bTags = @(Get-GoJsonTags $goText 'BackupStatus')
+    Assert-True 'Go BackupStatus tags found' ($bTags.Count -ge 10)
+    foreach ($k in $bsOk.Keys) { Assert-True ('backup-status key "' + $k + '" is a Go json tag') ($bTags -contains $k) }
+    $sTags = @(Get-GoJsonTags $goText 'BackupStats')
+    foreach ($k in $st.Keys) { Assert-True ('stats key "' + $k + '" is a Go json tag') ($sTags -contains $k) }
+} else { Write-Host '  (panel/internal/hoststate/types.go not found - contract tag check skipped)' }
+
+Section 'wg show dump (vpn list)'
+$dumpText = "SRVPRIV=`tSRVPUB=`t43210`toff`n" +
+"PUB1=`tPSK1=`t203.0.113.9:40000`t10.99.77.2/32`t1790388000`t1048576`t2097152`t0`n" +
+"PUB2=`t(none)`t(none)`t10.99.77.3/32`t0`t0`t0`toff"
+$dump = ConvertFrom-HvWgShowDumpText $dumpText
+Assert-Eq 'dump peers' 2 $dump.Count
+Assert-Eq 'dump handshake' '1790388000' ([string]$dump['PUB1='].Handshake)
+Assert-Eq 'dump rx/tx' '1048576/2097152' ([string]$dump['PUB1='].Rx + '/' + [string]$dump['PUB1='].Tx)
+Assert-Eq 'dump no endpoint' '' $dump['PUB2='].Endpoint
+Assert-True 'dump interface line skipped' (-not $dump.ContainsKey('SRVPRIV='))
+Assert-Eq 'dump empty' 0 (ConvertFrom-HvWgShowDumpText '').Count
 
 Write-Host ''
 Write-Host ('unit tests: ' + $script:Pass + ' passed, ' + $script:Fail + ' failed')

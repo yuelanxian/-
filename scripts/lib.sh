@@ -66,18 +66,36 @@ hv_run_cleanup() {
 	HV_TMP_PATHS=()
 }
 
-# mktemp with 0600 (mktemp default) registered for removal on exit.
+# Per-process temp directory, created in the MAIN shell (hv calls hv_tmpdir_init before any command) and
+# removed on exit. hv_mktemp is mostly called as f=$(hv_mktemp): that runs in a subshell which cannot
+# register paths for cleanup, so every temp file lives inside this directory instead.
+HV_TMP_DIR=${HV_TMP_DIR:-}
+hv_tmpdir_init() {
+	[[ -n $HV_TMP_DIR && -d $HV_TMP_DIR ]] && return 0
+	HV_TMP_DIR=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/homevault.XXXXXXXX") || die "无法创建临时目录"
+	HV_TMP_PATHS+=("$HV_TMP_DIR")
+}
+
+# mktemp with 0600 inside HV_TMP_DIR (falls back to a registered file when not initialised)
 hv_mktemp() {
 	local f
-	f=$(umask 077 && mktemp "${TMPDIR:-/tmp}/homevault.XXXXXXXX") || die "无法创建临时文件"
-	HV_TMP_PATHS+=("$f")
+	if [[ -n $HV_TMP_DIR && -d $HV_TMP_DIR ]]; then
+		f=$(umask 077 && mktemp "$HV_TMP_DIR/t.XXXXXXXX") || die "无法创建临时文件"
+	else
+		f=$(umask 077 && mktemp "${TMPDIR:-/tmp}/homevault.XXXXXXXX") || die "无法创建临时文件"
+		HV_TMP_PATHS+=("$f")
+	fi
 	printf '%s\n' "$f"
 }
 
 hv_mktempdir() {
 	local d
-	d=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/homevault.XXXXXXXX") || die "无法创建临时目录"
-	HV_TMP_PATHS+=("$d")
+	if [[ -n $HV_TMP_DIR && -d $HV_TMP_DIR ]]; then
+		d=$(umask 077 && mktemp -d "$HV_TMP_DIR/d.XXXXXXXX") || die "无法创建临时目录"
+	else
+		d=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/homevault.XXXXXXXX") || die "无法创建临时目录"
+		HV_TMP_PATHS+=("$d")
+	fi
 	printf '%s\n' "$d"
 }
 

@@ -16,6 +16,16 @@ class ServerConfig(context: Context) {
     val nextcloudUrl: String?
         get() = customNextcloudUrl ?: panelUrl?.let { UrlRules.defaultNextcloudUrl(it) }
 
+    /**
+     * Panel address the WebView's cookies, web storage and cache belong to. MainActivity wipes them
+     * whenever this differs from [panelUrl] (server changed, even if the process died in between).
+     */
+    var sessionUrl: String?
+        get() = prefs.getString(KEY_SESSION_URL, null)
+        set(value) {
+            prefs.edit().putString(KEY_SESSION_URL, value).apply()
+        }
+
     fun save(panelUrl: String, customNextcloudUrl: String?) {
         prefs.edit()
             .putString(KEY_PANEL_URL, panelUrl)
@@ -27,5 +37,6 @@ class ServerConfig(context: Context) {
         const val PREFS = "homevault"
         const val KEY_PANEL_URL = "panel_url"
         const val KEY_NEXTCLOUD_URL = "nextcloud_url"
+        const val KEY_SESSION_URL = "session_url"
     }
 }

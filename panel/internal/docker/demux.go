@@ -2,6 +2,7 @@ package docker
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -72,21 +73,39 @@ func LooksMultiplexed(br *bufio.Reader) bool {
 	return b[0] <= StreamSystem && b[1] == 0 && b[2] == 0 && b[3] == 0
 }
 
-// limitWriter fails once more than N bytes have been written.
-type limitWriter struct {
-	w io.Writer
-	n int64
+// tailBuffer keeps only the last max bytes written to it (memory stays below 1.25 × max).
+type tailBuffer struct {
+	max     int
+	buf     []byte
+	dropped bool
 }
 
-var errLimit = errors.New("docker: output limit reached")
-
-func (l *limitWriter) Write(p []byte) (int, error) {
-	if int64(len(p)) > l.n {
-		k, _ := l.w.Write(p[:l.n])
-		l.n -= int64(k)
-		return k, errLimit
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	if t.max <= 0 {
+		t.dropped = t.dropped || len(p) > 0
+		return len(p), nil
 	}
-	k, err := l.w.Write(p)
-	l.n -= int64(k)
-	return k, err
+	t.buf = append(t.buf, p...)
+	if slack := max(t.max/4, 64<<10); len(t.buf) > t.max+slack {
+		t.buf = append([]byte(nil), t.buf[len(t.buf)-t.max:]...)
+		t.dropped = true
+	}
+	return len(p), nil
+}
+
+// Result returns the kept bytes; when older output was dropped the partial first line is removed.
+func (t *tailBuffer) Result() ([]byte, bool) {
+	b := t.buf
+	if len(b) > t.max {
+		b = b[len(b)-t.max:]
+		t.dropped = true
+	}
+	if t.dropped {
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			b = b[i+1:]
+		} else {
+			b = nil
+		}
+	}
+	return b, t.dropped
 }

@@ -131,10 +131,23 @@ if ($logDir !== '') {
 		$desired['log_type_audit'] = 'file';
 		$desired['logfile_audit'] = $logDir . '/audit.log';
 		$desired['log_rotate_size'] = 50 * 1024 * 1024;
+		// 0644: access is controlled by the host directory (0750 + ACL for the panel, uid 65532);
+		// Nextcloud re-applies this mode on every write (default 0640 would hide it from the panel)
+		$desired['logfilemode'] = 0644;
 	} else {
 		out('INFO 警告: 日志目录 ' . $logDir . ' 不存在或 www-data 无写权限，Nextcloud 日志仍写在数据目录'
 			. '（Linux 宿主机：sudo chown 33:33 <HV_LOG_DIR>/nextcloud，然后 ./hv restart）');
 	}
+}
+
+// admin_audit writes at INFO level, which the default loglevel (2 = warning) drops: without this
+// condition audit.log stays empty. Merge into an existing log.condition instead of replacing it.
+$cond = (isset($sys['log.condition']) && is_array($sys['log.condition'])) ? $sys['log.condition'] : [];
+$condApps = (isset($cond['apps']) && is_array($cond['apps'])) ? array_values($cond['apps']) : [];
+if (!in_array('admin_audit', $condApps, true)) {
+	$condApps[] = 'admin_audit';
+	$cond['apps'] = $condApps;
+	$desired['log.condition'] = $cond;
 }
 
 $changed = [];

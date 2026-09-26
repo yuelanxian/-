@@ -533,7 +533,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request, sess *auth.Sessi
 	}
 	s.audit.Log("request_"+typ, true, sess.UserID, s.clientIP(r), detail+" id="+req.ID)
 	if dup {
-		msg = "已有相同的请求在等待执行"
+		msg = "已有相同的请求正在等待或执行中，无需重复提交"
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "id": req.ID, "duplicate": dup, "message": msg})
 }
@@ -613,6 +613,8 @@ func logFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusRequestEntityTooLarge, "压缩日志过大，请下载后查看")
 	case errors.Is(err, fs.ErrNotExist):
 		writeError(w, http.StatusNotFound, "日志文件不存在")
+	case errors.Is(err, fs.ErrPermission):
+		writeError(w, http.StatusForbidden, "管理面板没有权限读取该日志文件（Linux：在服务器上安装 acl 后运行 sudo ./hv up 修复日志目录权限）")
 	default:
 		// os.Root reports escapes (symlinks out of /logs, "..") as path errors
 		var pe *fs.PathError
@@ -929,6 +931,23 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request, sess *aut
 	if ct == nil {
 		return
 	}
+	if name == "caddy" {
+		// This request itself runs through Caddy: a synchronous restart would make Caddy's graceful
+		// stop wait for it until Docker kills Caddy (30 s), and the answer would never arrive.
+		// Answer first, then restart in the background.
+		user, ip := sess.UserID, s.clientIP(r)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			if err := s.docker.Restart(ctx, ct, 30); err != nil {
+				s.audit.Log("restart", false, user, ip, name+": "+err.Error())
+				return
+			}
+			s.audit.Log("restart", true, user, ip, name)
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "message": "正在重启「" + label(name) + "」，面板连接会中断几秒钟"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 	if err := s.docker.Restart(ctx, ct, 30); err != nil {
@@ -942,8 +961,21 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request, sess *aut
 
 // ---------------------------------------------------------------- downloads
 
+// readCA returns the local CA root from the first configured file that holds a certificate.
 func (s *Server) readCA() ([]byte, *x509.Certificate, error) {
-	f, err := os.Open(s.cfg.CACertFile)
+	err := error(fs.ErrNotExist)
+	for _, p := range s.cfg.CACertFiles {
+		out, first, ferr := readCAFile(p)
+		if ferr == nil {
+			return out, first, nil
+		}
+		err = ferr
+	}
+	return nil, nil, err
+}
+
+func readCAFile(p string) ([]byte, *x509.Certificate, error) {
+	f, err := os.Open(p)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1015,8 +1047,10 @@ func (s *Server) handleAPK(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() {
-		http.NotFound(w, r)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("安卓应用安装包无效。请在服务器上重新运行 hv android fetch（Windows：hv.ps1 android fetch）。\n"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.android.package-archive")

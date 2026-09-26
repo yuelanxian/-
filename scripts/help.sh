@@ -39,6 +39,8 @@ Nextcloud
 
 其他
   maintenance          每日维护（日志导出/轮转/清理、状态文件），由 systemd 定时执行
+  status-update        为管理面板写入 state/status.json 与 state/vpn-status.json（每 5 分钟自动执行）
+  requests process     执行管理面板提交的请求（仅 backup / log-clean / log-retention；由 systemd 自动触发）
   android fetch        下载 HomeVault 安卓 App 到 state/app/，供手机从管理面板下载
   compose <参数…>      以正确的文件/项目参数调用 docker compose（高级）
   help <命令>          查看某个命令的详细说明
@@ -166,7 +168,23 @@ EOF
   $HV_SELF logs show <文件|服务> [--lines N]
   sudo $HV_SELF logs retention [天数]    查看/设置日志保留天数（1–365）
   sudo $HV_SELF logs clean               立即清理过期日志
+日志目录：homevault/（命令记录）backup/（备份）nextcloud/（nextcloud.log、audit.log）caddy/（access.log）
+          containers/（每日导出的容器日志）panel/（管理面板审计日志）
 EOF
+		;;
+	requests)
+		cat <<EOF
+用法：sudo $HV_SELF requests process
+  处理管理面板写入 state/requests/ 的请求：backup（立即备份）、log-clean（清理日志）、log-retention（修改保留天数）。
+  其他类型一律拒绝；结果写入 state/requests/done/<ID>.result.json，面板据此显示「完成 / 失败」。
+  正常情况下由 homevault-requests.path（有新请求时）和 homevault-status.timer（每 5 分钟）自动执行。
+EOF
+		;;
+	maintenance | status-update)
+		msg "用法：sudo $HV_SELF maintenance（每日维护，00:10 自动执行）· sudo $HV_SELF status-update（刷新面板状态文件，每 5 分钟自动执行）"
+		;;
+	android)
+		msg "用法：sudo $HV_SELF android fetch [--url <APK地址>] [--file <本地APK>]   下载安卓 App 到 state/app/homevault.apk（默认从 HV_ANDROID_RELEASE_REPO 的最新 GitHub Release）"
 		;;
 	*) help_main "" ;;
 	esac

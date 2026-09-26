@@ -46,6 +46,15 @@ func (l *Limiter) RetryAfter(key string) time.Duration {
 	return h[0].Add(l.Window).Sub(now)
 }
 
+// Undo removes the most recent event of key (a reserved attempt that turned out fine).
+func (l *Limiter) Undo(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if h := l.hits[key]; len(h) > 0 {
+		l.hits[key] = h[:len(h)-1]
+	}
+}
+
 // Reset forgets key (e.g. after a successful login).
 func (l *Limiter) Reset(key string) {
 	l.mu.Lock()

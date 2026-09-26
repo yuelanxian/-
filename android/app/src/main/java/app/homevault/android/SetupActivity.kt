@@ -67,7 +67,6 @@ class SetupActivity : Activity() {
             UrlRules.Problem.INVALID -> R.string.url_error_invalid
             UrlRules.Problem.NO_HOST -> R.string.url_error_no_host
             UrlRules.Problem.CREDENTIALS -> R.string.url_error_credentials
-            UrlRules.Problem.QUERY -> R.string.url_error_query
             UrlRules.Problem.BAD_PORT -> R.string.url_error_port
         },
     )
@@ -86,7 +85,11 @@ class SetupActivity : Activity() {
                     panelInput.setText(parsed.url)
                     panelInput.setSelection(parsed.url.length)
                 }
-                if (parsed.portAdded) showStatus(getString(R.string.setup_port_added))
+                val notes = listOfNotNull(
+                    getString(R.string.setup_extra_dropped).takeIf { parsed.extraDropped },
+                    getString(R.string.setup_port_added).takeIf { parsed.portAdded },
+                )
+                if (notes.isNotEmpty()) showStatus(notes.joinToString("\n"))
                 parsed.url
             }
         }
@@ -135,27 +138,33 @@ class SetupActivity : Activity() {
         Thread {
             val outcome = ConnectionTester.test(panelUrl)
             runOnUiThread {
-                if (!isFinishing && !isDestroyed) showOutcome(outcome)
+                if (!isFinishing && !isDestroyed) showOutcome(panelUrl, outcome)
             }
         }.start()
     }
 
-    private fun showOutcome(outcome: ConnectionTester.Outcome) {
+    private fun showOutcome(panelUrl: String, outcome: ConnectionTester.Outcome) {
         testButton.isEnabled = true
         lastCertReason = when (outcome) {
             ConnectionTester.Outcome.CertUntrusted -> getString(R.string.cert_reason_untrusted)
             ConnectionTester.Outcome.CertDate -> getString(R.string.cert_reason_expired)
             ConnectionTester.Outcome.CertMismatch -> getString(R.string.cert_reason_mismatch)
-            is ConnectionTester.Outcome.Reachable -> null
+            is ConnectionTester.Outcome.Panel -> null
             else -> lastCertReason
         }
         val text = when (outcome) {
-            is ConnectionTester.Outcome.Reachable ->
-                if (outcome.looksLikeNextcloud) getString(R.string.test_ok_nextcloud)
-                else getString(R.string.test_ok, outcome.httpCode)
+            is ConnectionTester.Outcome.Panel -> {
+                val ok = getString(R.string.test_ok_panel, outcome.info.version ?: getString(R.string.value_unknown))
+                val filled = fillNextcloudUrl(panelUrl, outcome.info.nextcloudUrl)
+                if (filled == null) ok else ok + "\n" + getString(R.string.setup_nextcloud_filled, filled)
+            }
+            ConnectionTester.Outcome.Nextcloud -> getString(R.string.test_ok_nextcloud)
+            is ConnectionTester.Outcome.NotPanel -> getString(R.string.test_not_panel, outcome.httpCode)
+            is ConnectionTester.Outcome.ServerError -> getString(R.string.test_server_error, outcome.httpCode)
             ConnectionTester.Outcome.CertUntrusted -> getString(R.string.test_cert_untrusted)
             ConnectionTester.Outcome.CertDate -> getString(R.string.cert_reason_expired)
             ConnectionTester.Outcome.CertMismatch -> getString(R.string.test_cert_mismatch)
+            is ConnectionTester.Outcome.TlsFailed -> getString(R.string.test_tls_failed, outcome.message)
             ConnectionTester.Outcome.HostUnknown -> getString(R.string.test_host_unknown)
             ConnectionTester.Outcome.Timeout -> getString(R.string.test_timeout)
             ConnectionTester.Outcome.Refused -> getString(R.string.test_refused)
@@ -163,6 +172,19 @@ class SetupActivity : Activity() {
             is ConnectionTester.Outcome.Failed -> getString(R.string.test_other, outcome.message)
         }
         showStatus(text)
+    }
+
+    /**
+     * The panel reports the Nextcloud address browsers use (HV_PUBLIC_URL). When it is not the default
+     * (same host, port 443) and the optional field is empty, fill it in. Returns the filled URL or null.
+     */
+    private fun fillNextcloudUrl(panelUrl: String, reported: String?): String? {
+        if (reported == null || nextcloudInput.text.toString().isNotBlank()) return null
+        val url = (UrlRules.parseNextcloudUrl(reported) as? UrlRules.Parsed.Ok)?.url ?: return null
+        if (url == UrlRules.defaultNextcloudUrl(panelUrl)) return null
+        nextcloudInput.setText(url)
+        nextcloudInput.error = null
+        return url
     }
 
     private fun showCertificateHelp() {

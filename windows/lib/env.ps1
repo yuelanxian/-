@@ -230,15 +230,82 @@ function Get-HvDerivedEnv {
     return $d
 }
 
+function Test-HvRetentionDays {
+    # Log retention: integer 1-365 (SPEC section 14).
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $n = 0
+    if (-not [int]::TryParse(([string]$Text).Trim(), [ref]$n)) { return $false }
+    return ($n -ge 1 -and $n -le 365)
+}
+
+function Get-HvDefaultLogDir {
+    # Pure: <data root>\logs (Windows default <data drive>:\HomeVault\logs), from HV_DATA_DIR or HV_NC_DATA_PATH.
+    param([System.Collections.IDictionary]$Env)
+    $base = Get-HvEnvDictValue $Env 'HV_DATA_DIR'
+    if (-not $base) {
+        $nc = Get-HvEnvDictValue $Env 'HV_NC_DATA_PATH'
+        if ($nc) { $base = ($nc.TrimEnd('\', '/') -replace '[\\/][^\\/]*$', '') }
+    }
+    if (-not $base) { return '' }
+    $sep = '\'
+    if ($base.StartsWith('/')) { $sep = '/' }
+    return ($base.TrimEnd('\', '/') + $sep + 'logs')
+}
+
+function Get-HvEnvLogDir {
+    # HV_LOG_DIR of the loaded .env ('' when not installed).
+    if (-not (Test-HvEnvExists)) { return '' }
+    $e = Get-HvEnv
+    $d = Get-HvEnvDictValue $e 'HV_LOG_DIR'
+    if (-not $d) { $d = Get-HvDefaultLogDir $e }
+    return $d
+}
+
+function Get-HvEnvDefaults {
+    # Pure: values an older .env lacks but the current compose.yaml needs (upgrade path; never overwrites).
+    param([System.Collections.IDictionary]$Env)
+    $d = [ordered]@{}
+    $cur = Get-HvEnvDictValue $Env 'HV_LOG_DIR'
+    # a Linux sample path (from .env.example) on a Windows install is not a real choice
+    $bogus = ((Get-HvEnvDictValue $Env 'HV_PLATFORM') -eq 'windows' -and $cur.StartsWith('/') -and ((Get-HvEnvDictValue $Env 'HV_DATA_DIR') -match '^[A-Za-z]:'))
+    if (-not $cur -or $bogus) {
+        $ld = Get-HvDefaultLogDir $Env
+        if ($ld) { $d['HV_LOG_DIR'] = $ld }
+    }
+    if (-not (Test-HvRetentionDays (Get-HvEnvDictValue $Env 'HV_LOG_RETENTION_DAYS'))) { $d['HV_LOG_RETENTION_DAYS'] = '7' }
+    if (-not (Get-HvEnvDictValue $Env 'HV_PANEL_PORT')) { $d['HV_PANEL_PORT'] = '9443' }
+    return $d
+}
+
+function Get-HvLogSubdirs {
+    # Directories under HV_LOG_DIR that must exist before `up` (bind mounts; SPEC section 14).
+    return @('homevault', 'backup', 'nextcloud', 'caddy', 'containers', 'panel')
+}
+
+function Initialize-HvRuntimeDirs {
+    # HV_LOG_DIR\<subdirs>, state\requests\done and state\app (created before compose up).
+    $ld = Get-HvEnvLogDir
+    if ($ld) {
+        foreach ($s in (Get-HvLogSubdirs)) { [void](New-HvDirectory (Join-HvPath $ld $s)) }
+    }
+    $state = New-HvDirectory (Get-HvPath 'state')
+    [void](New-HvDirectory (Join-HvPath (Join-HvPath $state 'requests') 'done'))
+    [void](New-HvDirectory (Join-HvPath $state 'app'))
+}
+
 function Update-HvDerivedEnv {
-    # Recompute derived values and write them to .env if they changed.
+    # Recompute derived values (+ fill defaults missing from older installs) and write them to .env if they changed.
     $envv = Get-HvEnv -Reload
     $wgDir = ''
     if (Test-HvTrue (Get-HvEnvDictValue $envv 'HV_VPN_ENABLED' 'true')) {
         $candidate = Get-HvWinWgDir
         if ($candidate -and [System.IO.Directory]::Exists($candidate)) { $wgDir = $candidate }
     }
-    $d = Get-HvDerivedEnv -Env $envv -Platform 'windows' -WinWgDir $wgDir
+    $d = [ordered]@{}
+    $defaults = Get-HvEnvDefaults $envv
+    foreach ($k in $defaults.Keys) { $d[$k] = $defaults[$k] }
+    $derived = Get-HvDerivedEnv -Env $envv -Platform 'windows' -WinWgDir $wgDir
+    foreach ($k in $derived.Keys) { $d[$k] = $derived[$k] }
     $changed = $false
     foreach ($k in $d.Keys) { if ((Get-HvEnvDictValue $envv $k) -ne [string]$d[$k]) { $changed = $true } }
     if ($changed) { Update-HvEnv $d }
@@ -249,13 +316,17 @@ function Update-HvDerivedEnv {
 $script:HvGhcrImageVars = @('WG_EASY_IMAGE', 'SCRUTINY_IMAGE')
 
 function Get-HvMirrorPrefixes {
+    # Hub/Ghcr: registry prefixes without trailing slash; EnvHub/EnvGhcr: HV_MIRROR_HUB/HV_MIRROR_GHCR values
+    # ('' = upstream registries; otherwise ending with '/', as compose.yaml's panel build argument expects).
     param([string]$Preset, [string]$Hub = '', [string]$Ghcr = '')
     switch -regex ($Preset) {
-        '^(?i)(none|off|default|docker)$' { return @{ Hub = 'docker.io'; Ghcr = 'ghcr.io'; GoProxy = 'https://proxy.golang.org,direct' } }
-        '^(?i)daocloud$' { return @{ Hub = 'docker.m.daocloud.io'; Ghcr = 'ghcr.m.daocloud.io'; GoProxy = 'https://goproxy.cn,direct' } }
+        '^(?i)(none|off|default|docker)$' { return @{ Hub = 'docker.io'; Ghcr = 'ghcr.io'; GoProxy = 'https://proxy.golang.org,direct'; EnvHub = ''; EnvGhcr = '' } }
+        '^(?i)daocloud$' { return @{ Hub = 'docker.m.daocloud.io'; Ghcr = 'ghcr.m.daocloud.io'; GoProxy = 'https://goproxy.cn,direct'; EnvHub = 'docker.m.daocloud.io/'; EnvGhcr = 'ghcr.m.daocloud.io/' } }
         '^(?i)custom$' {
             if (-not $Hub -or -not $Ghcr) { throw '--mirror custom 需要同时提供 Docker Hub 和 ghcr.io 的镜像前缀。' }
-            return @{ Hub = $Hub.TrimEnd('/'); Ghcr = $Ghcr.TrimEnd('/'); GoProxy = 'https://goproxy.cn,direct' }
+            $h = $Hub.Trim().TrimEnd('/'); $g = $Ghcr.Trim().TrimEnd('/')
+            if ($h -match '^[a-z]+://' -or $g -match '^[a-z]+://') { throw '镜像前缀不要带 http:// 或 https://，例如 docker.m.daocloud.io' }
+            return @{ Hub = $h; Ghcr = $g; GoProxy = 'https://goproxy.cn,direct'; EnvHub = ($h + '/'); EnvGhcr = ($g + '/') }
         }
     }
     throw ('未知的镜像源：' + $Preset + '（可选 daocloud / custom / none）')
@@ -287,5 +358,9 @@ function Get-HvMirrorEnvChanges {
         }
     }
     $d['HV_GOPROXY'] = $Prefixes.GoProxy
+    if ($Prefixes.ContainsKey('EnvHub')) {
+        $d['HV_MIRROR_HUB'] = $Prefixes.EnvHub
+        $d['HV_MIRROR_GHCR'] = $Prefixes.EnvGhcr
+    }
     return $d
 }

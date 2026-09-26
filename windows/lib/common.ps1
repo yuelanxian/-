@@ -10,11 +10,34 @@ if (-not (Get-Variable -Name HvLogFile -Scope Script -ErrorAction SilentlyContin
 # ---------------------------------------------------------------- output
 
 function Write-HvLog {
+    # Append one line to the current log file (never pass secrets here).
     param([AllowEmptyString()][string]$Text)
     if (-not $script:HvLogFile) { return }
     try {
-        $line = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Text + "`n"
+        $line = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) + ' [' + $PID + '] ' + $Text + "`n"
         [System.IO.File]::AppendAllText($script:HvLogFile, $line, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Get-HvCliLogPath {
+    # Pure: <HV_LOG_DIR>\homevault\hv-YYYY-MM-DD.log (SPEC section 14).
+    param([string]$LogDir, [datetime]$Date)
+    if (-not $LogDir) { return '' }
+    $sep = '\'
+    if ($LogDir.StartsWith('/')) { $sep = '/' }
+    return ($LogDir.TrimEnd('\', '/') + $sep + 'homevault' + $sep + 'hv-' + $Date.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) + '.log')
+}
+
+function Start-HvCliLog {
+    # Point Write-HvLog at today's CLI log (only when HV_LOG_DIR exists) and record the command name.
+    param([string]$LogDir, [string]$CommandText = '')
+    if (-not $LogDir) { return }
+    try {
+        if (-not [System.IO.Directory]::Exists($LogDir)) { return }
+        $f = Get-HvCliLogPath -LogDir $LogDir -Date (Get-Date)
+        [void](New-HvDirectory ([System.IO.Path]::GetDirectoryName($f)))
+        $script:HvLogFile = $f
+        if ($CommandText) { Write-HvLog ('命令：hv.ps1 ' + $CommandText + '（用户 ' + (Get-HvCurrentUserName) + '）') }
     } catch { }
 }
 
@@ -460,12 +483,14 @@ function Invoke-HvNative {
         [switch]$Quiet,
         [switch]$Tee,
         [switch]$AllowFailure,
-        [AllowNull()][string]$InputText = $null
+        # untyped on purpose: a [string] parameter turns $null into '' (stdin would always be redirected)
+        [AllowNull()]$InputText = $null
     )
     $cmd = Get-Command $FilePath -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $cmd) {
         Stop-Hv ('找不到程序：' + $FilePath) 127
     }
+    if ($null -ne $InputText) { $InputText = [string]$InputText }
     $legacy = Test-HvLegacyArgPassing
     $argv = @()
     foreach ($a in @($ArgumentList)) { $argv += (ConvertTo-HvNativeArg -Arg $a -Legacy $legacy) }
@@ -634,6 +659,75 @@ function ConvertTo-HvJsonString {
     }
     [void]$sb.Append('"')
     return $sb.ToString()
+}
+
+function Format-HvIsoTime {
+    # RFC 3339 with the local offset, e.g. 2026-09-26T03:30:00+08:00 (UTC DateTime values keep +00:00).
+    param([datetime]$Time)
+    $dto = New-Object System.DateTimeOffset -ArgumentList $Time
+    return $dto.ToString("yyyy-MM-dd'T'HH:mm:sszzz", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function ConvertTo-HvJson {
+    # Pure, PS 5.1-safe JSON serializer (key order of ordered dictionaries is kept; no depth limit surprises).
+    # -Indent '' gives compact output. Strings use ConvertTo-HvJsonString (also escapes < > &).
+    param([AllowNull()]$Value, [string]$Indent = '  ', [int]$Level = 0)
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [string] -or $Value -is [char] -or $Value -is [guid]) { return (ConvertTo-HvJsonString ([string]$Value)) }
+    if ($Value -is [bool]) { if ($Value) { return 'true' } else { return 'false' } }
+    if ($Value -is [System.Management.Automation.SwitchParameter]) { if ($Value.IsPresent) { return 'true' } else { return 'false' } }
+    if ($Value -is [datetime]) { return (ConvertTo-HvJsonString (Format-HvIsoTime $Value)) }
+    if ($Value -is [System.DateTimeOffset]) { return (ConvertTo-HvJsonString ($Value.ToString("yyyy-MM-dd'T'HH:mm:sszzz", [System.Globalization.CultureInfo]::InvariantCulture))) }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    if ($Value -is [double] -or $Value -is [single]) {
+        $dv = [double]$Value
+        if ([double]::IsNaN($dv) -or [double]::IsInfinity($dv)) { return 'null' }
+        return $dv.ToString('R', $inv)
+    }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [int16] -or $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [uint16] -or $Value -is [uint32] -or $Value -is [uint64] -or $Value -is [decimal]) {
+        return ([System.Convert]::ToString($Value, $inv))
+    }
+    $nl = ''; $pad = ''; $pad2 = ''; $colon = ':'
+    if ($Indent) { $nl = "`n"; $pad = $Indent * $Level; $pad2 = $Indent * ($Level + 1); $colon = ': ' }
+    $parts = New-Object System.Collections.Generic.List[string]
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($k in @($Value.Keys)) { $parts.Add($pad2 + (ConvertTo-HvJsonString ([string]$k)) + $colon + (ConvertTo-HvJson -Value $Value[$k] -Indent $Indent -Level ($Level + 1))) }
+        if ($parts.Count -eq 0) { return '{}' }
+        return ('{' + $nl + ($parts.ToArray() -join (',' + $nl)) + $nl + $pad + '}')
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($pr in $Value.PSObject.Properties) { $parts.Add($pad2 + (ConvertTo-HvJsonString ([string]$pr.Name)) + $colon + (ConvertTo-HvJson -Value $pr.Value -Indent $Indent -Level ($Level + 1))) }
+        if ($parts.Count -eq 0) { return '{}' }
+        return ('{' + $nl + ($parts.ToArray() -join (',' + $nl)) + $nl + $pad + '}')
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        foreach ($item in $Value) { $parts.Add($pad2 + (ConvertTo-HvJson -Value $item -Indent $Indent -Level ($Level + 1))) }
+        if ($parts.Count -eq 0) { return '[]' }
+        return ('[' + $nl + ($parts.ToArray() -join (',' + $nl)) + $nl + $pad + ']')
+    }
+    return (ConvertTo-HvJsonString ([string]$Value))
+}
+
+function Move-HvFileReplace {
+    # Rename Source over Destination (atomic on the same volume where supported).
+    param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Destination)
+    if ([System.IO.File]::Exists($Destination)) {
+        try { [System.IO.File]::Replace($Source, $Destination, $null); return } catch { }
+        [System.IO.File]::Delete($Destination)
+    }
+    [System.IO.File]::Move($Source, $Destination)
+}
+
+function Write-HvJsonFile {
+    # UTF-8 (no BOM) + LF JSON, written to a temp file first and then renamed (readers never see half a file).
+    param([Parameter(Mandatory = $true)][string]$Path, [AllowNull()]$Value, [switch]$Raw)
+    $dir = [System.IO.Path]::GetDirectoryName($Path)
+    if ($dir) { [void](New-HvDirectory $dir) }
+    $tmp = Join-HvPath $dir ('.' + [System.IO.Path]::GetFileName($Path) + '.' + $PID + '.tmp')
+    if ($Raw) { $text = [string]$Value } else { $text = (ConvertTo-HvJson -Value $Value) + "`n" }
+    Write-HvTextFile -Path $tmp -Content $text
+    Move-HvFileReplace -Source $tmp -Destination $Path
 }
 
 function ConvertFrom-HvJsonArrayText {
