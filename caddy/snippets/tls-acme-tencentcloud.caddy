@@ -1,7 +1,8 @@
 # 域名模式（腾讯云 DNSPod，API 3.0）：Let's Encrypt DNS-01 验证，无需开放 80/443。
 # 凭据来自 secrets/caddy-dns.env：TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY（运行时读取）。
 cert_issuer acme {
-	email {$HV_ACME_EMAIL}
+	# "email <邮箱>" 或空（HV_ACME_EMAIL 留空时不登记邮箱；由 compose 生成，空的 email 指令会让 Caddy 无法启动）
+	{$HV_ACME_EMAIL_DIRECTIVE}
 	disable_http_challenge
 	disable_tlsalpn_challenge
 	dns tencentcloud {

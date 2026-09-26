@@ -196,3 +196,18 @@ func TestFlowMaxPending(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestLimiterUndo(t *testing.T) {
+	l := NewLimiter(2, time.Minute)
+	if !l.Allow("ip") || !l.Allow("ip") || l.Allow("ip") {
+		t.Fatal("limit 2 not enforced")
+	}
+	l.Undo("ip")
+	if !l.Allow("ip") {
+		t.Fatal("undo did not give the attempt back")
+	}
+	l.Undo("nobody") // no-op
+	if l.RetryAfter("nobody") != 0 {
+		t.Fatal("unknown key limited")
+	}
+}

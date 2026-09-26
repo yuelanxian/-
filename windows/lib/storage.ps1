@@ -120,13 +120,38 @@ function ConvertTo-HvYamlSingleQuoted {
 function Get-HvPanelStatMounts {
     # Pure: read-only mounts that let the management panel show disk usage (SPEC section 15):
     # /config/storage.conf, /stat/data (NC data), /stat/backup (local backup target), /stat/storage/<slug>.
-    param([object[]]$Rows = @(), [string]$StorageConfPath = '', [string]$NcDataPath = '', [string]$BackupPath = '')
+    # -StateDir: the panel's state folder again, read-only, with only state\requests writable and
+    # state\requests\done read-only (the ownership rules that protect state\ on Linux do not exist for Docker
+    # Desktop bind mounts: without this the panel container could rewrite every file the host reads there).
+    param([object[]]$Rows = @(), [string]$StorageConfPath = '', [string]$NcDataPath = '', [string]$BackupPath = '', [string]$StateDir = '')
     $m = @()
-    if ($StorageConfPath) { $m += [pscustomobject]@{ Source = $StorageConfPath; Target = '/config/storage.conf'; Comment = 'storage.conf' } }
-    if ($NcDataPath) { $m += [pscustomobject]@{ Source = $NcDataPath; Target = '/stat/data'; Comment = 'Nextcloud 主数据' } }
-    if ($BackupPath) { $m += [pscustomobject]@{ Source = $BackupPath; Target = '/stat/backup'; Comment = '本地备份仓库' } }
-    foreach ($r in @($Rows)) { $m += [pscustomobject]@{ Source = $r.Path; Target = ('/stat/storage/' + $r.Slug); Comment = $r.Name } }
+    if ($StorageConfPath) { $m += [pscustomobject]@{ Source = $StorageConfPath; Target = '/config/storage.conf'; Comment = 'storage.conf'; ReadOnly = $true } }
+    if ($NcDataPath) { $m += [pscustomobject]@{ Source = $NcDataPath; Target = '/stat/data'; Comment = 'Nextcloud 主数据'; ReadOnly = $true } }
+    if ($BackupPath) { $m += [pscustomobject]@{ Source = $BackupPath; Target = '/stat/backup'; Comment = '本地备份仓库'; ReadOnly = $true } }
+    foreach ($r in @($Rows)) { $m += [pscustomobject]@{ Source = $r.Path; Target = ('/stat/storage/' + $r.Slug); Comment = $r.Name; ReadOnly = $true } }
+    if ($StateDir) {
+        $sep = '\'
+        if ($StateDir.StartsWith('/')) { $sep = '/' }
+        $sd = $StateDir.TrimEnd('\', '/')
+        $m += [pscustomobject]@{ Source = $sd; Target = '/state'; Comment = 'state（管理面板只读）'; ReadOnly = $true }
+        $m += [pscustomobject]@{ Source = ($sd + $sep + 'requests'); Target = '/state/requests'; Comment = 'state\requests（管理面板提交请求，唯一可写）'; ReadOnly = $false }
+        $m += [pscustomobject]@{ Source = ($sd + $sep + 'requests' + $sep + 'done'); Target = '/state/requests/done'; Comment = 'state\requests\done（执行结果，只读）'; ReadOnly = $true }
+    }
     return $m
+}
+
+function Get-HvStatProbePath {
+    # Pure: <folder that contains the Nextcloud data folder>\.panel-stat - an empty folder on the same disk, mounted
+    # as /stat/data on Windows. The panel only needs the disk's size (statfs); Docker Desktop bind mounts have no
+    # permission checks, so mounting the data folder itself would let the panel container read every user's files.
+    param([AllowEmptyString()][string]$NcDataPath)
+    $t = ([string]$NcDataPath).TrimEnd('\', '/')
+    if (-not $t) { return '' }
+    $sep = '\'
+    if ($t.StartsWith('/')) { $sep = '/' }
+    $i = $t.LastIndexOfAny([char[]]@([char]92, [char]47))
+    if ($i -lt 0) { return '' }
+    return ($t.Substring(0, $i) + $sep + '.panel-stat')
 }
 
 function Get-HvYamlBindEntry {
@@ -180,7 +205,9 @@ function ConvertTo-HvComposeStorageYaml {
         [void]$sb.Append("  panel:`n")
         [void]$sb.Append("    volumes:`n")
         foreach ($m in $panel) {
-            [void]$sb.Append((Get-HvYamlBindEntry -Source $m.Source -Target $m.Target -ReadOnly $true -Comment ([string]$m.Comment)))
+            $ro = $true
+            if ($null -ne $m.PSObject.Properties['ReadOnly']) { $ro = [bool]$m.ReadOnly }
+            [void]$sb.Append((Get-HvYamlBindEntry -Source $m.Source -Target $m.Target -ReadOnly $ro -Comment ([string]$m.Comment)))
         }
     }
     return $sb.ToString()
@@ -347,15 +374,31 @@ function Test-HvStoragePathUsable {
 }
 
 function Get-HvPanelStatMountsForHost {
-    # Panel stat mounts for this installation. On Windows only existing paths are mounted: a disconnected
+    # Panel mounts for this installation. On Windows only existing paths are mounted: a disconnected
     # USB backup disk must not stop the panel from starting (regenerated on every up / backup / storage apply).
+    # Windows: /stat/data is an empty probe folder next to the data folder (same disk), not the data itself.
     param([object[]]$Rows = @())
     $envv = Get-HvEnv
     $conf = Get-HvStorageConfPath
     if (-not [System.IO.File]::Exists($conf)) { $conf = '' }
     $bk = ''
     if ((Get-HvEnvDictValue $envv 'HV_BACKUP_TARGET') -eq 'local') { $bk = Get-HvEnvDictValue $envv 'HV_BACKUP_LOCAL_PATH' }
-    $all = @(Get-HvPanelStatMounts -Rows $Rows -StorageConfPath $conf -NcDataPath (Get-HvEnvDictValue $envv 'HV_NC_DATA_PATH') -BackupPath $bk)
+    $nc = Get-HvEnvDictValue $envv 'HV_NC_DATA_PATH'
+    if ($nc -and (Test-HvWindows)) {
+        $probe = Get-HvStatProbePath $nc
+        if ($probe -and [System.IO.Directory]::Exists([System.IO.Path]::GetDirectoryName($probe))) {
+            try {
+                $di = New-Object System.IO.DirectoryInfo($probe)
+                if (-not $di.Exists) { $di.Create(); $di.Refresh() }
+                $di.Attributes = $di.Attributes -bor [System.IO.FileAttributes]::Hidden
+                $nc = $probe
+            } catch { Write-HvWarn ('无法创建 ' + $probe + '：' + $_.Exception.Message) }
+        }
+    }
+    # the nested mounts need these folders on the host (create_host_path: false)
+    $state = Get-HvStateDir
+    [void](New-HvDirectory (Join-HvPath (Join-HvPath $state 'requests') 'done'))
+    $all = @(Get-HvPanelStatMounts -Rows $Rows -StorageConfPath $conf -NcDataPath $nc -BackupPath $bk -StateDir $state)
     if (-not (Test-HvWindows)) { return $all }
     $ok = @()
     foreach ($m in $all) {

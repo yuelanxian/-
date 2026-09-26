@@ -155,6 +155,8 @@ function Get-HvLocalIPv4s {
 }
 
 function Get-HvPublicIPv4 {
+    # Windows PowerShell 5.1 may default to TLS 1.0 only (these services require TLS 1.2).
+    try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12 } catch { }
     foreach ($u in @('https://4.ipw.cn', 'https://ddns.oray.com/checkip', 'https://ip.3322.net')) {
         try {
             $r = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 6

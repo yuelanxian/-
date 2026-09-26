@@ -408,10 +408,19 @@ function Test-HvLegacyArgPassing {
 }
 
 function ConvertTo-HvNativeArg {
+    # Legacy mode (Windows PowerShell 5.1): PowerShell wraps an argument containing whitespace in "..." without
+    # escaping anything, so embedded quotes are escaped here and - when PowerShell will wrap the argument -
+    # trailing backslashes are doubled ("E:\My Backup\" would otherwise reach the program as E:\My Backup").
     param([AllowEmptyString()][string]$Arg, [bool]$Legacy = $true)
     if (-not $Legacy) { return $Arg }
     if ($Arg -eq '') { return '""' }
-    if ($Arg.IndexOf('"') -lt 0) { return $Arg }
+    $ws = -1
+    $wm = [regex]::Match($Arg, '\s')
+    if ($wm.Success) { $ws = $wm.Index }
+    $q = $Arg.IndexOf('"')
+    # wrapped by every PowerShell 5.x variant when the first whitespace comes before the first quote
+    $wrapped = ($ws -ge 0 -and ($q -lt 0 -or $ws -lt $q))
+    if ($q -lt 0 -and -not ($wrapped -and $Arg.EndsWith('\'))) { return $Arg }
     $sb = New-Object System.Text.StringBuilder
     $bs = 0
     foreach ($ch in $Arg.ToCharArray()) {
@@ -425,7 +434,9 @@ function ConvertTo-HvNativeArg {
         if ($bs -gt 0) { [void]$sb.Append(('\' * $bs)); $bs = 0 }
         [void]$sb.Append($ch)
     }
-    if ($bs -gt 0) { [void]$sb.Append(('\' * $bs)) }
+    if ($bs -gt 0) {
+        if ($wrapped) { [void]$sb.Append(('\' * ($bs * 2))) } else { [void]$sb.Append(('\' * $bs)) }
+    }
     return $sb.ToString()
 }
 
@@ -709,9 +720,38 @@ function ConvertTo-HvJson {
     return (ConvertTo-HvJsonString ([string]$Value))
 }
 
+function Test-HvReparsePoint {
+    # True for a symbolic link / junction / other reparse point (file or directory); never follows it.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $a = [System.IO.File]::GetAttributes($Path)
+        return (($a -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+    } catch { return $false }
+}
+
+function New-HvTempPath {
+    # Unpredictable temp file name next to Path (.<name>.<random>.tmp): directories the management panel
+    # container can write to (state\) must not let it plant a link at a name the host will write through.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $dir = [System.IO.Path]::GetDirectoryName($Path)
+    return (Join-HvPath $dir ('.' + [System.IO.Path]::GetFileName($Path) + '.' + (New-HvRandomString 16) + '.tmp'))
+}
+
+function Write-HvNewTextFile {
+    # Like Write-HvTextFile, but the file must not exist yet (CreateNew never follows a planted link).
+    param([Parameter(Mandatory = $true)][string]$Path, [AllowEmptyString()][string]$Content)
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((ConvertTo-HvLf $Content))
+    $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
+}
+
 function Move-HvFileReplace {
-    # Rename Source over Destination (atomic on the same volume where supported).
+    # Rename Source over Destination (atomic on the same volume where supported). A destination that is a
+    # link is removed first (the link itself, never its target), so the host never writes through it.
     param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Destination)
+    if (Test-HvReparsePoint $Destination) {
+        if ([System.IO.Directory]::Exists($Destination)) { [System.IO.Directory]::Delete($Destination) } else { [System.IO.File]::Delete($Destination) }
+    }
     if ([System.IO.File]::Exists($Destination)) {
         try { [System.IO.File]::Replace($Source, $Destination, $null); return } catch { }
         [System.IO.File]::Delete($Destination)
@@ -724,10 +764,14 @@ function Write-HvJsonFile {
     param([Parameter(Mandatory = $true)][string]$Path, [AllowNull()]$Value, [switch]$Raw)
     $dir = [System.IO.Path]::GetDirectoryName($Path)
     if ($dir) { [void](New-HvDirectory $dir) }
-    $tmp = Join-HvPath $dir ('.' + [System.IO.Path]::GetFileName($Path) + '.' + $PID + '.tmp')
+    $tmp = New-HvTempPath $Path
     if ($Raw) { $text = [string]$Value } else { $text = (ConvertTo-HvJson -Value $Value) + "`n" }
-    Write-HvTextFile -Path $tmp -Content $text
-    Move-HvFileReplace -Source $tmp -Destination $Path
+    try {
+        Write-HvNewTextFile -Path $tmp -Content $text
+        Move-HvFileReplace -Source $tmp -Destination $Path
+    } finally {
+        if ([System.IO.File]::Exists($tmp)) { try { [System.IO.File]::Delete($tmp) } catch { } }
+    }
 }
 
 function ConvertFrom-HvJsonArrayText {

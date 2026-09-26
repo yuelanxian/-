@@ -203,3 +203,44 @@ test_restore_norm_path() {
 	assert_eq /src/nextcloud-data/alice/files/照片 "$(restore_norm_path 'alice/files/照片/')"
 	assert_eq /src/caddy-data "$(restore_norm_path /src/caddy-data)"
 }
+
+test_storage_render_scrutiny_devices() {
+	HV_PLATFORM=linux HV_NC_DATA_PATH='' HV_BACKUP_LOCAL_PATH='' HV_STORAGE_CONF=$TMP_ROOT/none-scrutiny.conf
+	ST_NAME=() ST_PATH=() ST_MODE=() ST_BACKUP=() ST_USERS=() ST_SLUG=()
+	local y HV_MONITOR_ENABLED=false HV_SCRUTINY_DEVICES='/dev/sda /dev/nvme0'
+	assert_eq '' "$(storage_render_compose 1 1 0 1)" "monitor disabled → no devices"
+	HV_MONITOR_ENABLED=true
+	y=$(storage_render_compose 1 1 0 1 2>/dev/null)
+	assert_contains "$y" $'  scrutiny:\n    devices:\n      - "/dev/sda:/dev/sda"\n      - "/dev/nvme0:/dev/nvme0"'
+	HV_SCRUTINY_DEVICES='/dev/../etc/shadow sda /dev/null'
+	y=$(storage_render_compose 1 1 1 1 2>/dev/null)
+	assert_eq $'# 由 hv storage apply 根据 storage.conf 自动生成，请勿手动编辑（重新生成会覆盖）\nservices:\n  scrutiny:\n    devices:\n      - "/dev/null:/dev/null"' "$y" "invalid names dropped, existing device kept"
+	HV_SCRUTINY_DEVICES='/dev/hv-does-not-exist'
+	assert_eq '' "$(storage_render_compose 1 1 1 1 2>/dev/null)" "missing device skipped"
+}
+
+test_storage_path_guard() {
+	HV_PLATFORM=linux HV_BACKUP_TARGET=local
+	local HV_DATA_DIR=/mnt/disk1/homevault HV_NC_DATA_PATH=/mnt/disk1/homevault/nextcloud-data
+	local HV_VOL_CADDY_DATA=/mnt/disk1/homevault/caddy-data HV_VOL_DB=/mnt/disk1/homevault/postgres
+	local HV_BACKUP_LOCAL_PATH=/mnt/usb/restic HV_LOG_DIR=/mnt/disk1/homevault/logs HV_DUMP_DIR=/mnt/disk1/homevault/dumps
+	local p
+	for p in / /etc /etc/ssh /var/lib/docker/volumes /proc /root/x "$HV_ROOT" "$HV_ROOT/secrets" "${HV_ROOT%/*}" \
+		/mnt/disk1/homevault /mnt/disk1 /mnt /mnt/disk1/homevault/caddy-data/caddy /mnt/disk1/homevault/postgres \
+		/mnt/usb /mnt/usb/restic/data /mnt/disk1/homevault/nextcloud-data/alice /mnt/disk1/homevault/../homevault/caddy-data \
+		/mnt/disk1/homevault/logs/panel /mnt/disk1/homevault/dumps; do
+		storage_path_problem "$p" >/dev/null || fail "must be refused: $p"
+	done
+	for p in /mnt/disk1/照片 /mnt/disk1/homevault/extra-photos /srv/media /home/alice/Pictures /mnt/usb2; do
+		if storage_path_problem "$p" >/dev/null; then fail "must be allowed: $p ($(storage_path_problem "$p"))"; fi
+	done
+	# enforced when storage.conf is parsed (hand-edited file)
+	printf '密钥|%s|ro|no|\n照片|/mnt/disk1/照片|rw|no|\n' "$HV_VOL_CADDY_DATA" >"$TMP_ROOT/guard.conf"
+	assert_fail storage_parse_conf "$TMP_ROOT/guard.conf"
+	storage_parse_conf "$TMP_ROOT/guard.conf" 2>/dev/null || true
+	assert_eq '照片' "${ST_NAME[*]}" "only the allowed row is kept"
+	# Windows paths are validated by hv.ps1
+	HV_PLATFORM=windows
+	printf '系统|C:\\Windows|ro|no|\n' >"$TMP_ROOT/guard-win.conf"
+	assert_ok storage_parse_conf "$TMP_ROOT/guard-win.conf"
+}

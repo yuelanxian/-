@@ -151,7 +151,7 @@ cmd_install() {
 	local o_backup_target='' o_backup_path='' o_s3_repo='' o_s3_opts='' o_s3_id='' o_s3_secret_file=''
 	local o_admin_user='' o_project=${COMPOSE_PROJECT_NAME:-} o_wg_host='' o_wg_port='' o_vpn=1 o_vpn_access='' o_extra_hosts=''
 	local o_log_days='' o_firewall=1 o_ufw=0 o_systemd=1 o_timeout=1800 o_retention_set=0 o_subnet='' o_start=1
-	local first=1 lan det_ip det_cidr domain v secret changed_vpn=0 rc=0
+	local first=1 lan det_ip det_cidr domain v secret changed_vpn=0 rc=0 prev_backup=''
 	while (($#)); do
 		case $1 in
 		--non-interactive) HV_NONINTERACTIVE=1 ;;
@@ -269,6 +269,9 @@ cmd_install() {
 		domain=$(ask "输入域名（留空 = IP 模式）" "$v")
 		[[ -n $domain ]] || domain=$HV_LAN_IP
 	fi
+	# people paste URLs ("https://nas.example.com/"): keep only the host name
+	domain=$(hv_normalize_host "$domain")
+	valid_host "$domain" || die "访问地址格式不正确：$domain（只填 IP 或域名，例如 nas.example.com）"
 	env_set HV_HOST "$domain"
 	if [[ -n $o_tls ]]; then
 		env_set HV_TLS_MODE "$o_tls"
@@ -280,7 +283,8 @@ cmd_install() {
 	if [[ $HV_TLS_MODE == acme-dns ]]; then
 		is_ipv4 "$HV_HOST" && die "域名模式需要域名（--host example.com）"
 		env_set HV_DNS_PROVIDER "${o_provider:-$(ask_choice "DNS 服务商" "${HV_DNS_PROVIDER:-alidns}" alidns tencentcloud cloudflare)}"
-		env_set HV_ACME_EMAIL "${o_email:-$(ask "证书通知邮箱（可留空）" "${HV_ACME_EMAIL:-}")}"
+		env_set HV_ACME_EMAIL "$(trim "${o_email:-$(ask "证书通知邮箱（可留空）" "${HV_ACME_EMAIL:-}")}")"
+		[[ -z $HV_ACME_EMAIL ]] || valid_email "$HV_ACME_EMAIL" || die "邮箱格式不正确：$HV_ACME_EMAIL（可以留空）"
 		if [[ ! -s $HV_ROOT/secrets/caddy-dns.env || -n $o_dns_secret_file ]]; then
 			install -d -m 0700 "$HV_ROOT/secrets"
 			if [[ -n $o_dns_secret_file ]]; then
@@ -326,6 +330,7 @@ cmd_install() {
 
 	# ---- backup -------------------------------------------------------------
 	title "备份"
+	prev_backup=${HV_BACKUP_LOCAL_PATH:-}
 	if [[ -n $o_backup_path ]]; then
 		env_set HV_BACKUP_TARGET local
 		[[ $o_backup_path == /* ]] || die "备份目录必须是绝对路径：$o_backup_path"
@@ -373,7 +378,8 @@ cmd_install() {
 			[[ -n $v ]] && msg "检测到当前公网 IPv4：$v（动态 IP 请使用 DDNS 域名：sudo $HV_SELF ddns setup）"
 			o_wg_host=$(ask "VPN 连接地址（DDNS 域名或公网 IP）" "$v")
 		fi
-		[[ -n $o_wg_host ]] && env_set WG_HOST "$o_wg_host"
+		[[ -n $o_wg_host ]] && env_set WG_HOST "$(hv_normalize_host "$o_wg_host")"
+		[[ -z $WG_HOST ]] || valid_host "$WG_HOST" || die "VPN 连接地址格式不正确：$WG_HOST（只填 DDNS 域名或公网 IP，端口用 --wg-port）"
 		[[ -n $WG_HOST ]] || die "需要 VPN 连接地址（--wg-host 域名或公网IP），或使用 --no-vpn"
 		if [[ -n $o_wg_port ]]; then
 			env_set WG_PORT "$o_wg_port"
@@ -441,7 +447,15 @@ cmd_install() {
 	install_dir "$HV_VOL_CADDY_CONFIG" 0700
 	vpn_enabled && install_dir "$HV_VOL_WGEASY" 0700
 	install_dir "$HV_DUMP_DIR" 0700
-	[[ $HV_BACKUP_TARGET == local && -n $HV_BACKUP_LOCAL_PATH ]] && install_dir "$HV_BACKUP_LOCAL_PATH" 0700
+	if [[ $HV_BACKUP_TARGET == local && -n $HV_BACKUP_LOCAL_PATH ]]; then
+		# re-run with an unplugged backup disk: never create the repository directory on the system disk
+		# (install would then initialise a fresh repository there and backups would silently land on it)
+		if [[ -d $HV_BACKUP_LOCAL_PATH ]] || ((first)) || [[ $HV_BACKUP_LOCAL_PATH != "$prev_backup" ]]; then
+			install_dir "$HV_BACKUP_LOCAL_PATH" 0700
+		else
+			warn "备份目录不存在：$HV_BACKUP_LOCAL_PATH（备份硬盘未挂载？）。为避免把备份写到系统盘，不会自动创建；挂载硬盘后运行：sudo $HV_SELF backup"
+		fi
+	fi
 	state_prepare_dirs
 	install -d -m 0700 "$HV_ROOT/clients"
 	logs_prepare_dirs verbose

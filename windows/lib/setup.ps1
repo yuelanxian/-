@@ -512,6 +512,12 @@ function Invoke-HvCmdInstall {
     Write-HvOk ('.env 已写入：' + $envPath)
 
     # ---- secrets and directories
+    # The kit's scripts run elevated (menu, install) and as scheduled tasks: other local accounts must not be able
+    # to change them (a folder created on a secondary drive inherits "Authenticated Users: Modify").
+    if (Test-HvAdmin) {
+        if (-not (Test-HvPrivateAcl $root)) { Write-HvInfo ('收紧 HomeVault 程序目录权限（仅 SYSTEM / 管理员 / 当前用户）：' + $root) }
+        Set-HvPrivateAcl -Path $root
+    }
     $created = @(Initialize-HvSecrets)
     if ($created.Count -gt 0) { Write-HvOk ('已生成密钥：' + ($created -join ', ')) } else { Write-HvInfo '已有密钥保持不变。' }
     foreach ($d in @($loc.Base, $loc.NcData, (Get-HvEnvValue 'HV_DUMP_DIR'))) { [void](New-HvDirectory $d) }
@@ -583,7 +589,8 @@ function Invoke-HvCmdInstall {
     Invoke-HvOptionalStep 'Invoke-HvStatusUpdate' '状态文件（state\status.json）'
     Show-HvInstallSummary -Created $created -CaPath $ca
     if ((Test-HvWindows) -and (Test-HvInteractive)) {
-        Write-HvInfo ('正在浏览器中打开管理面板：' + (Get-HvPanelUrl))
-        try { Start-Process -FilePath (Get-HvPanelUrl) } catch { Write-HvWarn '无法自动打开浏览器，请手动访问上面的地址。' }
+        # via explorer.exe: the browser runs as the signed-in user, not elevated like this installer
+        Write-HvInfo '正在浏览器中打开管理面板（用 Nextcloud 管理员账号登录）...'
+        Open-HvUrl (Get-HvPanelUrl)
     }
 }

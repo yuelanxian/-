@@ -496,8 +496,13 @@ function Invoke-HvLogs {
             return
         }
     }
-    # container output: logs [服务...] [follow]
+    # container output: logs [服务...] [follow]; like the Linux CLI it follows by default in an interactive window
     $follow = (Test-HvOpt $p 'follow') -or (Test-HvOpt $p 'f')
+    if (-not $follow -and -not $p.Opts.ContainsKey('follow') -and (Test-HvInteractive)) {
+        $redirected = $true
+        try { $redirected = [System.Console]::IsOutputRedirected } catch { }
+        if (-not $redirected) { $follow = $true }
+    }
     $svcs = @()
     foreach ($x in $pos) {
         if (@('follow', '-f') -contains $x.ToLowerInvariant()) { $follow = $true } else { $svcs += $x }
@@ -573,7 +578,7 @@ function Copy-HvCaToState {
         if ([System.IO.File]::Exists($dst)) { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue }
         return ''
     }
-    $tmp = Join-HvPath $state ('.ca.crt.' + $PID + '.tmp')
+    $tmp = New-HvTempPath $dst
     try {
         $p = Export-HvCa -Path $tmp
         if (-not $p -or -not [System.IO.File]::Exists($tmp)) { return '' }

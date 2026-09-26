@@ -24,14 +24,16 @@ vpn_hooks() {
 	local s="iptables -t nat $op POSTROUTING -s {{ipv4Cidr}} -o {{device}} -j MASQUERADE; "
 	s+="iptables $op INPUT -p udp -m udp --dport {{port}} -j ACCEPT; "
 	s+="iptables $op INPUT -i wg0 -p tcp --dport {{uiPort}} -j DROP; "
+	s+="iptables $op FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; "
 	if [[ ${HV_VPN_LAN_ACCESS:-host} == full ]]; then
-		s+="iptables $op FORWARD -i wg0 -j ACCEPT; "
-		s+="iptables $op FORWARD -o wg0 -j ACCEPT;"
+		# the whole home LAN, but never the Docker network behind wg-easy (app:80 / panel:8080 would bypass
+		# Caddy and could spoof X-Forwarded-For) and no internet exit through the home connection
+		s+="iptables $op FORWARD -i wg0 -d ${HV_FRONTEND_SUBNET:-172.31.250.0/24} -j DROP; "
+		s+="iptables $op FORWARD -i wg0 -d ${HV_LAN_CIDR} -j ACCEPT; "
 	else
-		s+="iptables $op FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; "
 		s+="iptables $op FORWARD -i wg0 -d ${HV_LAN_IP}/32 -j ACCEPT; "
-		s+="iptables $op FORWARD -i wg0 -j DROP;"
 	fi
+	s+="iptables $op FORWARD -i wg0 -j DROP;"
 	printf '%s\n' "$s"
 }
 

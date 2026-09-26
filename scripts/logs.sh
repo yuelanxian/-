@@ -56,11 +56,11 @@ logs_clean() {
 	[[ -n ${HV_LOG_DIR:-} && -d $HV_LOG_DIR ]] || return 0
 	days=$(logs_retention_days)
 	for f in "${HV_LOG_ACTIVE[@]}"; do keep+=(! -name "$f"); done
-	while IFS= read -r -d '' f; do
-		rm -f -- "$f" && n=$((n + 1))
-	done < <(find "$HV_LOG_DIR" -xdev -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.gz' -o -name '*.txt' \) \
-		"${keep[@]}" -mmin +$((days * 1440)) -print0 2>/dev/null)
-	HV_LOGS_CLEANED=$n
+	# find -delete (unlinkat relative to the directory being walked), not "find | rm": panel/ and nextcloud/
+	# belong to container users, who could otherwise swap a directory for a symlink between listing and rm
+	n=$({ find "$HV_LOG_DIR" -xdev -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.gz' -o -name '*.txt' \) \
+		"${keep[@]}" -mmin +$((days * 1440)) -delete -printf . 2>/dev/null || true; } | wc -c)
+	HV_LOGS_CLEANED=$((n + 0))
 	ok "已清理 $n 个超过 $days 天的日志文件"
 }
 

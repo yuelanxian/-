@@ -90,19 +90,24 @@ main() {
 	env_defaults
 	HV_STATE_DIR=$HV_ROOT/state
 
-	# log the command line (values after secret-like flags are masked)
-	local prev=''
+	# log the command line (values after secret-like flags are masked; for e.g.
+	# "occ config:system:set mail_smtppassword --value=…" also the --value)
+	local prev='' sensitive=0 all="${*,,}"
+	[[ $all =~ pass|secret|token|key|pwd ]] && sensitive=1
 	for a in "$@"; do
-		if [[ ${prev,,} == --*secret* || ${prev,,} == --*password* || ${prev,,} == --*token* ]]; then
+		if [[ ${prev,,} == --*secret* || ${prev,,} == --*password* || ${prev,,} == --*token* ]] ||
+			{ ((sensitive)) && [[ ${prev,,} == --value ]]; }; then
 			logged+=('***')
-		elif [[ $a == *=* && ${a%%=*} =~ [Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Kk][Ee][Yy] ]]; then
+		elif [[ $a == *=* ]] && [[ ${a%%=*} =~ [Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Kk][Ee][Yy] ]] ||
+			{ ((sensitive)) && [[ ${a,,} == --value=* ]]; }; then
 			logged+=("${a%%=*}=***")
 		else
 			logged+=("$a")
 		fi
 		prev=$a
 	done
-	hv_log "CMD $cmd ${logged[*]}"
+	# the 5-minute status/requests timers would flood the log; they log what they actually do themselves
+	[[ $cmd == status-update || $cmd == requests ]] || hv_log "CMD $cmd ${logged[*]}"
 
 	case $cmd in
 	help | -h | --help) help_main "$@" ;;

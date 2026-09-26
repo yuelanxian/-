@@ -55,7 +55,7 @@ function Invoke-HvAndroidFetch {
     param([string]$Url = '', [string]$File = '', [string]$Sha256 = '')
     $appDir = New-HvDirectory (Join-HvPath (Get-HvStateDir) 'app')
     $dest = Join-HvPath $appDir 'homevault.apk'
-    $tmp = Join-HvPath $appDir ('.homevault.apk.' + $PID + '.tmp')
+    $tmp = New-HvTempPath $dest
     $want = ''
     if ($Sha256) {
         $want = ConvertFrom-HvSha256Text $Sha256
@@ -96,7 +96,7 @@ function Invoke-HvAndroidFetch {
         if ($want -and $hash -ne $want) { Stop-Hv ('SHA-256 校验失败：期望 ' + $want + '，实际 ' + $hash + '（文件可能不完整或被篡改），已丢弃。') }
         if (-not (Test-HvApkFile $tmp)) { Stop-Hv '文件不是有效的 APK 安装包（ZIP 格式），已丢弃。' }
         Move-HvFileReplace -Source $tmp -Destination $dest
-        Write-HvTextFile -Path ($dest + '.sha256') -Content ($hash + '  homevault.apk' + "`n")
+        Write-HvJsonFile -Path ($dest + '.sha256') -Value ($hash + '  homevault.apk' + "`n") -Raw
         $size = (New-Object System.IO.FileInfo($dest)).Length
         Write-HvOk ('已保存：' + $dest + '（' + (ConvertTo-HvSizeText $size) + '）')
         Write-HvInfo ('SHA-256：' + $hash)

@@ -254,7 +254,9 @@ function Test-HvWeakHost {
 function Register-HvWeakHostTask {
     # SYSTEM task: at startup + every 5 minutes. Inline command (no user-writable script runs as SYSTEM).
     $cmd = "Get-NetIPInterface -InterfaceAlias '" + $script:HvTunnelName + "' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Set-NetIPInterface -WeakHostReceive Enabled -WeakHostSend Enabled -ErrorAction SilentlyContinue"
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command "' + $cmd + '"')
+    # full path: a bare powershell.exe would be looked up via PATH by a SYSTEM task
+    $ps = Join-HvPath ([System.Environment]::GetEnvironmentVariable('SystemRoot')) 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command "' + $cmd + '"')
     $rep = (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)).Repetition
     $t1 = New-ScheduledTaskTrigger -AtStartup
     $t1.Repetition = $rep
@@ -292,10 +294,24 @@ function Update-HvWgTunnel {
     Save-HvVpnStatusFile
 }
 
+function Get-HvProgramDataAclArgs {
+    # Pure: icacls arguments for ProgramData\HomeVault - SYSTEM + Administrators full, Users read only. (ProgramData
+    # lets every user create folders, and that right is inherited by new subfolders.)
+    param([string]$Path)
+    return @($Path, '/inheritance:r', '/grant:r', ('*' + $script:HvSidSystem + ':(OI)(CI)F'), ('*' + $script:HvSidAdmins + ':(OI)(CI)F'), '*S-1-5-32-545:(OI)(CI)RX', '/Q')
+}
+
 function Set-HvWgDirAcl {
     # SYSTEM + Administrators full; the current user gets read so the Docker Desktop backup container can include it.
+    # Administrators become the owner: an owner keeps WRITE_DAC whatever the ACL says, so a folder pre-created by
+    # another local user (possible under ProgramData) would otherwise stay under that user's control.
     $p = Get-HvWgPaths
     if (-not [System.IO.Directory]::Exists($p.Dir)) { return }
+    if (Test-HvWindows) {
+        $parent = [System.IO.Path]::GetDirectoryName($p.Dir)
+        if ($parent) { [void](Invoke-HvNative -FilePath 'icacls.exe' -ArgumentList (Get-HvProgramDataAclArgs $parent) -Capture -AllowFailure) }
+        [void](Invoke-HvNative -FilePath 'icacls.exe' -ArgumentList @($p.Dir, '/setowner', ('*' + $script:HvSidAdmins), '/T', '/C', '/Q') -Capture -AllowFailure)
+    }
     Set-HvPrivateAcl -Path $p.Dir -UserReadOnly
 }
 

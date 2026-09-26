@@ -14,10 +14,13 @@ _state_env() {
 	HV_STATE_DIR=$TMP_ROOT/state-$RANDOM
 	mkdir -p "$HV_STATE_DIR"
 	HV_PLATFORM=linux HV_VPN_ENABLED=false
-	HV_DATA_DIR=$TMP_ROOT HV_NC_DATA_PATH=$TMP_ROOT HV_LOG_DIR=$TMP_ROOT/logs HV_LOG_RETENTION_DAYS=14
+	HV_DATA_DIR=$TMP_ROOT HV_NC_DATA_PATH=$TMP_ROOT/state-ncdata HV_LOG_DIR=$TMP_ROOT/logs HV_LOG_RETENTION_DAYS=14
+	mkdir -p "$HV_NC_DATA_PATH"
 	HV_BACKUP_TARGET=local HV_BACKUP_LOCAL_PATH=$TMP_ROOT/not-mounted HV_BACKUP_TIME=03:30
 	HV_STORAGE_CONF=$TMP_ROOT/state-storage.conf
-	printf '照片 "归档"|%s|rw|yes|\n' "$TMP_ROOT" >"$HV_STORAGE_CONF"
+	# (a storage may not overlap the data dir, NC data or the backup repository: storage_path_problem)
+	mkdir -p "$TMP_ROOT/state-photos"
+	printf '照片 "归档"|%s|rw|yes|\n' "$TMP_ROOT/state-photos" >"$HV_STORAGE_CONF"
 }
 
 test_status_json_canonical() {
@@ -163,6 +166,14 @@ test_logs_clean_retention() {
 		[[ -f $HV_LOG_DIR/$f ]] || fail "must be kept: $f"
 	done
 	[[ -e $HV_LOG_DIR/homevault/hv-2020-01-01.log ]] && fail "old log not deleted"
+	# a container-owned subdirectory must not lead the (root) cleanup outside HV_LOG_DIR
+	local outside=$TMP_ROOT/lc-outside-$RANDOM
+	mkdir -p "$outside" "$HV_LOG_DIR/panel"
+	echo x >"$outside/victim.log"
+	touch -d '30 days ago' "$outside/victim.log"
+	ln -s "$outside" "$HV_LOG_DIR/panel/evil"
+	logs_clean >/dev/null
+	[[ -f $outside/victim.log ]] || fail "logs_clean followed a symlink out of HV_LOG_DIR"
 	HV_LOG_RETENTION_DAYS=5
 	logs_clean >/dev/null
 	[[ -e $HV_LOG_DIR/containers/app-recent.log ]] && fail "6-day-old log must go with 5 days retention"

@@ -108,6 +108,12 @@ restic_run() {
 		esac
 	done
 	restic_repo_args repo
+	# The repository is a short-syntax bind mount: Docker would silently create a missing host directory
+	# (backup disk not mounted) on the system disk. Refuse instead.
+	if [[ ${HV_BACKUP_TARGET:-local} != s3 && ! -d ${HV_BACKUP_LOCAL_PATH:-/nonexistent} ]]; then
+		err "备份目录不存在：${HV_BACKUP_LOCAL_PATH:-未设置}（备份硬盘是否已挂载？）"
+		return 1
+	fi
 	if ((${#files[@]})); then
 		local -a a
 		hv_compose_args a
@@ -256,9 +262,14 @@ backup_run() {
 
 	[[ $(dc_state db) == healthy || $(dc_state db) == running ]] || die "数据库容器未运行，无法导出（先运行 $HV_SELF up）"
 	if [[ $(dc_state app) == healthy || $(dc_state app) == running ]]; then
-		info "开启维护模式（仅在导出数据库期间）…"
-		occ maintenance:mode --on >/dev/null || die "无法开启维护模式"
-		_HV_MAINT_ON=1
+		if occ status --output=json 2>/dev/null | grep -q '"maintenance":true'; then
+			# switched on by the admin (upgrade, repair…): the nightly backup must not switch it off
+			info "Nextcloud 已处于维护模式（管理员开启），备份不会改变它"
+		else
+			info "开启维护模式（仅在导出数据库期间）…"
+			occ maintenance:mode --on >/dev/null || die "无法开启维护模式"
+			_HV_MAINT_ON=1
+		fi
 	fi
 	backup_dump_db || rc=$?
 	backup_maint_off || rc=1

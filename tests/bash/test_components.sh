@@ -20,9 +20,14 @@ test_vpn_hooks_full_mode() {
 	_vpn_vars
 	HV_VPN_LAN_ACCESS=full
 	local up
+	HV_FRONTEND_SUBNET=172.31.250.0/24
 	up=$(vpn_hooks up)
-	assert_contains "$up" 'iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT;'
+	# whole LAN only: never the Docker network (app:80 / panel:8080 behind Caddy) and no internet exit
+	assert_contains "$up" 'iptables -A FORWARD -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; iptables -A FORWARD -i wg0 -d 172.31.250.0/24 -j DROP; iptables -A FORWARD -i wg0 -d 192.168.1.0/24 -j ACCEPT; iptables -A FORWARD -i wg0 -j DROP;'
+	assert_not_contains "$up" 'FORWARD -i wg0 -j ACCEPT'
+	assert_not_contains "$up" 'FORWARD -o wg0 -j ACCEPT'
 	assert_contains "$up" 'iptables -A INPUT -i wg0 -p tcp --dport {{uiPort}} -j DROP'
+	assert_eq "${up//-A /-D }" "$(vpn_hooks down)" "PostDown mirrors PostUp"
 	assert_eq '10.99.77.0/24,192.168.1.0/24' "$(vpn_allowed_ips)"
 }
 

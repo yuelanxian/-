@@ -220,13 +220,50 @@ hv_write_derived() {
 	done
 }
 
+# hv_normalize_host "https://NAS.Example.com:443/x" → nas.example.com (users often paste a URL; IPv6 unsupported)
+hv_normalize_host() {
+	local h
+	h=$(trim "$1")
+	h=${h#*://}
+	h=${h%%/*}
+	h=${h%%:*}
+	printf '%s\n' "${h,,}"
+}
+
+# IPv4 or DNS name (these values end up in Caddy site addresses and Nextcloud trusted_domains)
+valid_host() {
+	is_ipv4 "$1" && return 0
+	[[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] &&
+		! [[ $1 =~ ^[0-9.]+$ ]]
+}
+
+valid_email() { [[ $1 =~ ^[^@[:space:]\"\'{}]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
+
 # Validation of the fields the CLI relies on (returns non-zero with messages).
 hv_validate_env() {
-	local rc=0 p
+	local rc=0 p h
 	[[ -n $HV_HOST ]] || {
 		err "HV_HOST 未设置"
 		rc=1
 	}
+	if [[ -n $HV_HOST ]] && ! valid_host "$HV_HOST"; then
+		err "HV_HOST 格式不正确：$HV_HOST（只填 IP 或域名，不要带 https:// 或端口）"
+		rc=1
+	fi
+	for h in ${HV_EXTRA_HOSTS:-}; do
+		valid_host "$h" || {
+			err "HV_EXTRA_HOSTS 中的地址格式不正确：$h（只填 IP 或域名，空格分隔）"
+			rc=1
+		}
+	done
+	if [[ -n ${HV_BIND_IP:-} ]] && ! is_ipv4 "$HV_BIND_IP"; then
+		err "HV_BIND_IP 必须是 IPv4 地址：$HV_BIND_IP（不要留空或写 IPv6，否则可能暴露到公网 IPv6）"
+		rc=1
+	fi
+	if [[ ${HV_PLATFORM:-linux} == linux ]] && is_true "${HV_VPN_ENABLED:-false}" && [[ -n ${WG_HOST:-} ]] && ! valid_host "$WG_HOST"; then
+		err "WG_HOST 格式不正确：$WG_HOST（只填 DDNS 域名或公网 IP，不要带端口）"
+		rc=1
+	fi
 	local -A used=()
 	for p in HV_HTTP_PORT HV_HTTPS_PORT HV_ADMIN_PORT HV_PANEL_PORT; do
 		if ! [[ ${!p} =~ ^[0-9]+$ ]] || ((${!p} < 1 || ${!p} > 65535)); then
@@ -256,6 +293,10 @@ hv_validate_env() {
 			err "域名模式（acme-dns）下 HV_HOST 必须是域名，而不是 IP"
 			rc=1
 		}
+		if [[ -n ${HV_ACME_EMAIL:-} ]] && ! valid_email "$HV_ACME_EMAIL"; then
+			err "HV_ACME_EMAIL 不是有效的邮箱地址：$HV_ACME_EMAIL（可以留空）"
+			rc=1
+		fi
 	fi
 	return $rc
 }

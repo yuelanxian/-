@@ -38,6 +38,24 @@
 	}
 }
 
+# 管理界面（面板、wg-easy）的跨站请求兜底：浏览器从其它网站/其它端口发来的写请求（POST/PUT/DELETE…）一律 403。
+# wg-easy 自身没有 CSRF 防护（其会话 Cookie 未设 SameSite，Firefox 会随跨站请求发送），而它的「钩子」可执行命令。
+# 依据：Sec-Fetch-Site（现代浏览器都会发送）；没有该头时比较 Origin 与本站地址。curl 等非浏览器客户端不受影响。
+(csrf_guard) {
+	@crosssite {
+		not method GET HEAD OPTIONS
+		header Sec-Fetch-Site cross-site
+		header Sec-Fetch-Site same-site
+	}
+	@badorigin {
+		not method GET HEAD OPTIONS
+		header Origin *
+		expression `{http.request.header.Origin} != "https://" + {http.request.hostport}`
+	}
+	respond @crosssite "跨站请求已拒绝" 403
+	respond @badorigin "跨站请求已拒绝" 403
+}
+
 {$HV_SITE_ADDRESSES} {
 	import access_log
 
@@ -74,6 +92,7 @@ https://{$HV_HOST}:{$HV_PANEL_PORT} {
 		header Strict-Transport-Security "max-age=15552000"
 		header -Server
 
+		import csrf_guard
 		reverse_proxy panel:8080
 	}
 }

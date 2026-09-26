@@ -192,6 +192,8 @@ services:
       HV_TLS_SNIPPET: ${HV_TLS_SNIPPET:-internal}
       HV_ADMIN_SNIPPET: ${HV_ADMIN_SNIPPET:-none}
       HV_ACME_EMAIL: ${HV_ACME_EMAIL:-}
+      # 域名模式 snippets 使用：邮箱为空时整条 email 指令省略（"email " 不带参数会让 Caddy 拒绝启动）
+      HV_ACME_EMAIL_DIRECTIVE: ${HV_ACME_EMAIL:+email ${HV_ACME_EMAIL}}
       TZ: ${HV_TZ:-Asia/Shanghai}
     # DNS 服务商凭据（仅域名模式）：ALIYUN_* / TENCENTCLOUD_* / CF_API_TOKEN
     env_file:

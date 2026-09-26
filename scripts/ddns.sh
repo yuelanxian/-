@@ -65,6 +65,9 @@ ddns_setup() {
 	if [[ -z ${WG_HOST:-} ]] || is_ipv4 "${WG_HOST:-}"; then
 		env_set WG_HOST "$domain"
 		warn "WG_HOST 已改为 $domain：已创建的 VPN 客户端需要把 Endpoint 改成该域名（或重新导入）"
+		if vpn_enabled; then
+			warn "同时请在 wg-easy 管理界面（https://${HV_HOST}:${HV_ADMIN_PORT}）→ 管理面板 → 配置 中把「主机（Host）」改为 $domain，之后新建的设备才会使用该域名"
+		fi
 	fi
 	ok "已写入 $HV_DDNS_FILE"
 	msg "建议：为 DNS API 使用只授权该域名的子账号/令牌（阿里云 RAM 子用户、Cloudflare 单 Zone Token）。"

@@ -161,6 +161,7 @@ panel_build_if_needed() {
 # Everything `up` needs before docker compose runs (idempotent; directories only as root)
 hv_prepare_up() {
 	hv_ensure_env_keys
+	hv_validate_env || die ".env 配置有误（见上方说明），请修改 $HV_ENV_FILE 后重试"
 	hv_write_derived
 	storage_render_if_needed
 	logs_prepare_dirs

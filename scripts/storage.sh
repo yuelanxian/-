@@ -19,9 +19,46 @@ storage_conf_header() {
 EOF
 }
 
+# storage_path_problem PATH → prints why PATH must not become a Nextcloud storage (status 0), else status 1.
+# Linux only. Every Nextcloud user who sees the mount could otherwise read (or, rw, change) HomeVault's own
+# secrets, database files or the Caddy CA private key, or the host system.
+storage_path_problem() {
+	local p s label
+	p=$(realpath -m -- "$1" 2>/dev/null) || p=$1
+	case $p in
+	/ | /etc | /etc/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/* | /boot | /boot/* | /root | /root/* | \
+		/usr | /usr/* | /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* | /var/lib/docker | /var/lib/docker/* | \
+		/var/run | /var/run/*)
+		printf '系统目录 %s\n' "$p"
+		return 0
+		;;
+	esac
+	while IFS='|' read -r label s; do
+		[[ $s == /* ]] || continue
+		s=$(realpath -m -- "$s" 2>/dev/null) || continue
+		# the data root may contain storages (e.g. /mnt/disk1/照片), but must not itself be (inside) one
+		if [[ $label == data-root ]]; then
+			[[ $p == "$s" || $s == "$p"/* ]] && { printf 'HomeVault 数据目录 %s\n' "$s"; return 0; }
+			continue
+		fi
+		if [[ $p == "$s" || $p == "$s"/* || $s == "$p"/* ]]; then
+			printf '%s %s\n' "$label" "$s"
+			return 0
+		fi
+	done < <(
+		printf '%s|%s\n' 'HomeVault 程序目录（含密钥）' "${HV_ROOT:-}" 'Nextcloud 主数据目录' "${HV_NC_DATA_PATH:-}" \
+			data-root "${HV_DATA_DIR:-}" 'Nextcloud 程序目录' "${HV_VOL_HTML:-}" '数据库目录' "${HV_VOL_DB:-}" \
+			'Redis 目录' "${HV_VOL_REDIS:-}" 'Caddy 数据目录（含 CA 私钥）' "${HV_VOL_CADDY_DATA:-}" \
+			'Caddy 配置目录' "${HV_VOL_CADDY_CONFIG:-}" 'wg-easy 目录（含 VPN 密钥）' "${HV_VOL_WGEASY:-}" \
+			'数据库导出目录' "${HV_DUMP_DIR:-}" '日志目录' "${HV_LOG_DIR:-}"
+		[[ ${HV_BACKUP_TARGET:-local} == local ]] && printf '%s|%s\n' '备份仓库' "${HV_BACKUP_LOCAL_PATH:-}"
+	)
+	return 1
+}
+
 # storage_parse_conf [file] → fills ST_* arrays; returns 1 on validation errors
 storage_parse_conf() {
-	local file=${1:-$HV_STORAGE_CONF} line n=0 rc=0 name path mode backup users extra
+	local file=${1:-$HV_STORAGE_CONF} line n=0 rc=0 name path mode backup users extra problem
 	local -A seen_name=() seen_path=()
 	ST_NAME=() ST_PATH=() ST_MODE=() ST_BACKUP=() ST_USERS=() ST_SLUG=()
 	[[ -f $file ]] || return 0
@@ -49,6 +86,11 @@ storage_parse_conf() {
 		fi
 		if [[ $HV_PLATFORM != windows && $path != /* ]]; then
 			err "storage.conf 第 $n 行：主机路径必须是绝对路径：$path"
+			rc=1
+			continue
+		fi
+		if [[ $HV_PLATFORM != windows ]] && problem=$(storage_path_problem "$path"); then
+			err "storage.conf 第 $n 行：不能把 $path 作为额外存储：与$problem 重叠（Nextcloud 用户将能访问其中的文件）"
 			rc=1
 			continue
 		fi
@@ -111,10 +153,32 @@ _st_panel_bind() {
 	_st_bind "$1" "$2" true
 }
 
-# storage_render_compose <with_backup:0|1> <with_panel:0|1> [check_exists:1|0] → YAML on stdout (empty when nothing to add)
+# _st_scrutiny_devices [check_exists:1|0] — Scrutiny (profile monitor, Linux): HV_SCRUTINY_DEVICES →
+# services.scrutiny.devices. Missing devices are skipped with a warning (they would stop the container).
+_st_scrutiny_devices() {
+	local d any=0
+	is_true "${HV_MONITOR_ENABLED:-false}" || return 0
+	for d in ${HV_SCRUTINY_DEVICES:-}; do
+		if ! [[ $d =~ ^/dev/[A-Za-z0-9/_.-]+$ && $d != *..* ]]; then
+			warn "HV_SCRUTINY_DEVICES：忽略无效的设备名 $d（例如 /dev/sda /dev/nvme0）" >&2
+			continue
+		fi
+		if [[ ${1:-1} == 1 && ! -b $d && ! -c $d ]]; then
+			warn "HV_SCRUTINY_DEVICES：设备 $d 不存在，已跳过" >&2
+			continue
+		fi
+		((any)) || printf '  scrutiny:\n    devices:\n'
+		any=1
+		printf '      - %s\n' "$(yaml_dq "$d:$d" compose)"
+	done
+	return 0
+}
+
+# storage_render_compose <with_backup:0|1> <with_panel:0|1> [check_exists:1|0] [with_scrutiny:0|1] → YAML on stdout
+# (empty when nothing to add).
 # Panel mounts (SPEC §15): /config/storage.conf, /stat/data, /stat/backup (local target), /stat/storage/<slug>, all read-only.
 storage_render_compose() {
-	local with_backup=${1:-1} with_panel=${2:-0} chk=${3:-1} i svc ro any_backup=0 out panel
+	local with_backup=${1:-1} with_panel=${2:-0} chk=${3:-1} with_scrutiny=${4:-0} i svc ro any_backup=0 out panel
 	out=$(
 		if ((${#ST_NAME[@]})); then
 			for svc in app cron; do
@@ -152,6 +216,8 @@ storage_render_compose() {
 				printf '  panel:\n    volumes:\n%s\n' "$panel"
 			fi
 		fi
+		((with_scrutiny)) && _st_scrutiny_devices "$chk"
+		true
 	)
 	[[ -n $out ]] || return 0
 	printf '# 由 hv storage apply 根据 storage.conf 自动生成，请勿手动编辑（重新生成会覆盖）\n'
@@ -160,14 +226,15 @@ storage_render_compose() {
 
 # Regenerate compose.storage.yaml. Returns 0 when the file changed, 1 when unchanged.
 storage_render_file() {
-	local tmp has_backup=0 has_panel=0 svc
+	local tmp has_backup=0 has_panel=0 has_scrutiny=0 svc
 	storage_parse_conf || die "storage.conf 有错误，请修正后重试"
 	while IFS= read -r svc; do
 		[[ $svc == backup ]] && has_backup=1
 		[[ $svc == panel ]] && has_panel=1
+		[[ $svc == scrutiny ]] && has_scrutiny=1
 	done < <(compose_services)
 	tmp=$(hv_mktemp)
-	storage_render_compose "$has_backup" "$has_panel" >"$tmp"
+	storage_render_compose "$has_backup" "$has_panel" 1 "$has_scrutiny" >"$tmp"
 	if [[ ! -s $tmp ]]; then
 		if [[ -f $HV_STORAGE_COMPOSE ]]; then
 			rm -f "$HV_STORAGE_COMPOSE"

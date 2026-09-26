@@ -57,6 +57,11 @@ if [[ -f $ROOT/tests/pwsh/unit-ux.ps1 ]]; then
 	run_pwsh /w/tests/pwsh/unit-ux.ps1 -Root /w -OutDir "$OUT" || bad "unit-ux.ps1"
 fi
 
+if [[ -f $ROOT/tests/pwsh/unit-sec.ps1 ]]; then
+	step "PowerShell unit tests (review fixes: PS 5.1 arguments, panel mounts, planted links, backup lock)"
+	run_pwsh /w/tests/pwsh/unit-sec.ps1 -Root /w -OutDir "$OUT/sec" || bad "unit-sec.ps1"
+fi
+
 step "PowerShell integration tests (repo .env.example)"
 run_pwsh /w/tests/pwsh/integ.ps1 -Root /w -OutDir "$OUT/integ" || bad "integ.ps1"
 
@@ -122,6 +127,20 @@ if merged=$(docker compose -p hvpwshtest --project-directory "$OUT" -f "$OUT/com
 		grep -qF "target: $t" <<<"$merged" || bad "merged config lacks panel mount $t"
 	done
 	printf '  ok   merged storage mounts\n'
+	# the panel's ./state:/state from compose.yaml must be replaced (merged by target), not duplicated:
+	# state read-only, only state/requests writable, state/requests/done read-only again
+	if json=$(docker compose -p hvpwshtest --project-directory "$OUT" -f "$OUT/compose.min.yaml" -f "$OUT/compose.storage.linux.yaml" --profile tools config --format json 2>/dev/null) &&
+		python3 - "$json" <<'PY'
+import json, sys
+vols = json.loads(sys.argv[1])["services"]["panel"]["volumes"]
+by = {}
+for v in vols:
+    by.setdefault(v["target"], []).append(bool(v.get("read_only", False)))
+ok = by.get("/state") == [True] and by.get("/state/requests") == [False] and by.get("/state/requests/done") == [True]
+ok = ok and all(ro for t, l in by.items() for ro in l if t not in ("/state/requests",))
+sys.exit(0 if ok else 1)
+PY
+	then printf '  ok   panel: state read-only, only state/requests writable\n'; else bad "panel state mounts after merge"; fi
 else
 	bad "merge of compose.storage.linux.yaml"
 fi

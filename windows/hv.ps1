@@ -37,14 +37,15 @@ HomeVault 家庭归档服务器 - Windows 管理工具 v$($script:HvVersion)
       --https-port 443 --http-port 80 --admin-port 8443 --panel-port 9443 --admin-user hvadmin
       --log-dir <路径>        日志目录（默认 <数据盘>:\HomeVault\logs）  --log-retention <天数>  日志保留天数（1-365，默认 7）
       --config-only          只生成配置，不启动；--skip-autostart；--skip-backup-init
-  up [--wait] | down | restart [服务] | status | pull
+  up [--wait] | down | restart [服务] | status | pull   （别名：start / stop / ps）
+  compose <参数...>        用 HomeVault 的配置文件运行 docker compose（排查问题用，例如 compose ps）
   update [--major] [--skip-backup]   先备份，再拉取镜像并重建容器；--major 升级一个 Nextcloud 大版本
   doctor                   健康与安全检查（✔/!/✘）
   autostart                配置开机无人值守（Docker 自启、自动登录、锁屏任务、电源；需管理员）
 
 日常管理与日志
   menu                     数字菜单（桌面快捷方式“HomeVault 管理”打开的就是它）
-  logs [服务] [--follow] [--tail N]    查看容器日志
+  logs [服务] [--follow] [--tail N]    查看容器日志（在交互窗口中默认实时跟踪，Ctrl+C 结束）
   logs list                列出日志文件（日志目录 HV_LOG_DIR）
   logs show <文件|服务> [--lines N]    显示日志内容
   logs open                在资源管理器中打开日志文件夹
@@ -134,17 +135,20 @@ function Invoke-HvMain {
     $cmd = (ConvertTo-HvArgString $argv[0]).ToLowerInvariant()
     $rest = @()
     if ($argv.Count -gt 1) { $rest = @($argv[1..($argv.Count - 1)]) }
-    if (@('help', '-h', '--help', '/?', '-?', 'version', '--version', '-v') -notcontains $cmd) {
+    # `requests` runs every 2 minutes: it starts the CLI log itself, only when there is work to do
+    if (@('help', '-h', '--help', '/?', '-?', 'version', '--version', '-v', 'requests') -notcontains $cmd) {
         try { if (Test-HvEnvExists) { Start-HvCliLog -LogDir (Get-HvEnvLogDir) -CommandText (Get-HvCommandSummary $argv) } } catch { }
     }
     switch ($cmd) {
         { @('help', '-h', '--help', '/?', '-?') -contains $_ } { Show-HvHelp; return }
         { @('version', '--version', '-v') -contains $_ } { Write-Host ('HomeVault ' + $script:HvVersion + '（PowerShell ' + $PSVersionTable.PSVersion.ToString() + '）'); return }
         'install' { Invoke-HvCmdInstall -Arguments $rest; return }
-        'up' { Invoke-HvCmdUp -Arguments $rest; return }
-        'down' { Invoke-HvCmdDown -Arguments $rest; return }
+        # aliases as in the Linux CLI: start/stop/ps/users/upgrade/check
+        { @('up', 'start') -contains $_ } { Invoke-HvCmdUp -Arguments $rest; return }
+        { @('down', 'stop') -contains $_ } { Invoke-HvCmdDown -Arguments $rest; return }
         'restart' { Invoke-HvCmdRestart -Arguments $rest; return }
-        'status' { Invoke-HvCmdStatus -Arguments $rest; return }
+        { @('status', 'ps') -contains $_ } { Invoke-HvCmdStatus -Arguments $rest; return }
+        'compose' { Invoke-HvCmdCompose -Arguments $rest; return }
         'logs' {
             [void](Set-HvGlobalSwitches $rest)
             if (Get-Command -Name 'Invoke-HvLogs' -CommandType Function -ErrorAction SilentlyContinue) { Invoke-HvLogs @rest } else { Invoke-HvCmdLogs -Arguments $rest }
@@ -156,10 +160,10 @@ function Invoke-HvMain {
         'requests' { [void](Set-HvGlobalSwitches $rest); & (Get-HvExternalCommand 'Invoke-HvRequests' 'requests') @rest; return }
         'android' { [void](Set-HvGlobalSwitches $rest); & (Get-HvExternalCommand 'Invoke-HvAndroid' 'android') @rest; return }
         'pull' { Invoke-HvCmdPull -Arguments $rest; return }
-        'update' { Invoke-HvCmdUpdate -Arguments $rest; return }
+        { @('update', 'upgrade') -contains $_ } { Invoke-HvCmdUpdate -Arguments $rest; return }
         'occ' { Invoke-HvCmdOcc -Arguments $rest; return }
         'harden' { Invoke-HvCmdHarden -Arguments $rest; return }
-        'user' { Invoke-HvCmdUser -Arguments $rest; return }
+        { @('user', 'users') -contains $_ } { Invoke-HvCmdUser -Arguments $rest; return }
         'ca' { Invoke-HvCmdCa -Arguments $rest; return }
         'storage' { Invoke-HvCmdStorage -Arguments $rest; return }
         'vpn' { Invoke-HvCmdVpn -Arguments $rest; return }
@@ -168,7 +172,7 @@ function Invoke-HvMain {
         'restore' { Invoke-HvCmdRestore -Arguments $rest; return }
         'schedule-backup' { Invoke-HvCmdScheduleBackup -Arguments $rest; return }
         'firewall' { Invoke-HvCmdFirewall -Arguments $rest; return }
-        'doctor' { Invoke-HvCmdDoctor -Arguments $rest; return }
+        { @('doctor', 'check') -contains $_ } { Invoke-HvCmdDoctor -Arguments $rest; return }
         'autostart' { Invoke-HvCmdAutostart -Arguments $rest; return }
         default { Stop-Hv ('未知命令：' + $cmd + '（运行 .\windows\hv.ps1 help 查看用法）') 2 }
     }

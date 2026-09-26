@@ -35,7 +35,8 @@ function Get-HvResticBackupArgs {
         '--exclude', '/src/nextcloud-data/appdata_*/preview',
         '--exclude', '/src/nextcloud-data/*.log',
         '--exclude', '/src/project/.git',
-        '--exclude', '/src/project/restore')
+        '--exclude', '/src/project/restore',
+        '--exclude', '/src/project/state/backup.lock')
     return $a
 }
 
@@ -323,7 +324,7 @@ function Save-HvSnapshotsJson {
     # state\snapshots.json = raw `restic snapshots --json` (byte-exact); returns the JSON text ('' on failure).
     param([System.Collections.IDictionary]$Env)
     $final = Get-HvBackupStatePath 'snapshots.json'
-    $tmp = Join-HvPath ([System.IO.Path]::GetDirectoryName($final)) ('.snapshots.json.' + $PID + '.tmp')
+    $tmp = New-HvTempPath $final
     $text = ''
     try {
         $a = @(Get-HvComposeArgs -Tools) + @('run', '--rm', '--no-deps', '-T', 'backup') + @(Get-HvResticRepoArgs $Env) +
@@ -346,10 +347,12 @@ function Save-HvBackupStatus {
 }
 
 function Enter-HvBackupLock {
-    # Exclusive lock so a scheduled backup and a panel request never run restic at the same time.
+    # Exclusive lock so a scheduled backup and a panel request never run restic at the same time. Readers stay
+    # allowed (FileShare.Read): restic reads the project folder through Docker Desktop's file sharing, and a file
+    # opened with FileShare.None there fails with a sharing violation (= restic exit 3, "partial" every time).
     $f = Get-HvBackupStatePath 'backup.lock'
     try {
-        return [System.IO.File]::Open($f, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        return [System.IO.File]::Open($f, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
     } catch {
         Stop-Hv '另一个备份任务正在运行（state\backup.lock 被占用），请稍后再试。' 11
     }
@@ -402,7 +405,7 @@ function Invoke-HvBackup {
         }
         $finished = Get-Date
         if ($state -eq 'ok') {
-            Write-HvTextFile -Path (Get-HvBackupStatePath 'last-backup-ok') -Content ((Format-HvIsoTime $finished) + "`n")
+            Write-HvJsonFile -Path (Get-HvBackupStatePath 'last-backup-ok') -Value ((Format-HvIsoTime $finished) + "`n") -Raw
             Write-HvOk ('备份成功：' + $finished.ToString('yyyy-MM-dd HH:mm:ss') + '（用时 ' + [int]($finished - $started).TotalMinutes + ' 分钟）')
         }
         $stats = $null
@@ -429,7 +432,8 @@ function Register-HvBackupTask {
     $hv = Join-HvPath (Join-HvPath (Get-HvRoot) 'windows') 'hv.ps1'
     $log = Join-HvPath (Get-HvEnvLogDir) 'backup'
     $arg = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $hv + '" backup --non-interactive'
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg -WorkingDirectory (Get-HvRoot)
+    $ps = Join-HvPath ([System.Environment]::GetEnvironmentVariable('SystemRoot')) 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $ps -Argument $arg -WorkingDirectory (Get-HvRoot)
     $trigger = New-ScheduledTaskTrigger -Daily -At $at
     $user = Get-HvDesktopUserName
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
@@ -549,8 +553,10 @@ function Invoke-HvRestoreFull {
     if (-not (Read-HvConfirmPhrase '这是不可撤销的操作。' 'RESTORE')) { Stop-Hv '已取消。' }
     $snap = Invoke-HvRestic -ResticArgs (@(Get-HvResticRepoArgs $Env) + @('snapshots', '--json', $Snapshot)) -Capture -AllowFailure
     if ($snap.ExitCode -ne 0 -or (Get-HvJsonSlice $snap.Text) -notmatch '"id"') { Stop-Hv ('找不到快照：' + $Snapshot) }
-    $overlay = Join-HvPath (New-HvDirectory (Get-HvPath 'state')) 'compose.restore.yaml'
-    Write-HvTextFile -Path $overlay -Content (New-HvRestoreOverlay)
+    # the overlay makes the backup sources writable: keep it out of state\ (the panel container can write there)
+    $overlay = Join-HvPath ([System.IO.Path]::GetTempPath()) ('homevault-restore-' + (New-HvRandomString 12) + '.yaml')
+    Write-HvNewTextFile -Path $overlay -Content (New-HvRestoreOverlay)
+    Set-HvPrivateAcl -Path $overlay
     try {
         Write-HvStep '停止 app / cron / caddy ...'
         [void](Invoke-HvCompose -Arguments @('stop', 'app', 'cron', 'caddy'))
@@ -566,8 +572,13 @@ function Invoke-HvRestoreFull {
         # recreate that role with the backed-up password, then the database owned by it, then import (owners kept)
         $db = Get-HvRestoredDbConfig
         Write-HvStep ('重建数据库 ' + $db.Name + '（所有者 ' + $db.User + '）...')
-        [void](Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', 'postgres') `
-                -InputText (New-HvRestoreDbSql -User $db.User -Password $db.Password -Name $db.Name) -Capture)
+        # stdin carries the role password: on failure show only the psql error lines, never the SQL (no -Tee, no log)
+        $dbr = Invoke-HvCompose -Arguments @('exec', '-T', 'db', 'psql', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'nextcloud', '-d', 'postgres') `
+            -InputText (New-HvRestoreDbSql -User $db.User -Password $db.Password -Name $db.Name) -Capture -AllowFailure
+        if ($dbr.ExitCode -ne 0) {
+            $errLine = @(@($dbr.StdErr) + @($dbr.Output) | Where-Object { [string]$_ -match '^(psql:.*)?ERROR:' } | ForEach-Object { ([string]$_ -replace "PASSWORD\s+'[^']*'", "PASSWORD '***'") } | Select-Object -First 1)
+            Stop-Hv ('重建数据库失败（psql 退出码 ' + $dbr.ExitCode + '）' + $(if ($errLine.Count -gt 0) { '：' + $errLine[0] } else { '' })) $dbr.ExitCode
+        }
         [void](Invoke-HvCompose -Arguments @('cp', $dump, 'db:/tmp/hv-restore.sql'))
         try {
             Write-HvInfo ('导入数据库转储（' + (ConvertTo-HvSizeText (New-Object System.IO.FileInfo($dump)).Length) + '）...')

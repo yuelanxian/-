@@ -132,8 +132,12 @@ cmd_ca() {
 		ok "域名模式使用公开受信任的证书（Let's Encrypt 等），设备无需安装根证书。"
 		return 0
 	fi
+	local dir mode=0755
 	[[ -n $export_path ]] || export_path=$HV_ROOT/clients/HomeVault-CA.crt
-	install -d -m 0755 "$(dirname "$export_path")"
+	dir=$(dirname "$export_path")
+	# create only: clients/ is 0700 (VPN client configs with private keys); never loosen an existing dir
+	[[ $dir == "$HV_ROOT/clients" ]] && mode=0700
+	[[ -d $dir ]] || install -d -m "$mode" "$dir"
 	ca_fetch "$export_path" 60 || die "无法读取 Caddy 本地 CA（caddy 是否在运行？）"
 	fp=$(cert_fingerprint "$export_path")
 	ok "根证书已导出：$export_path"

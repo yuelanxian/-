@@ -239,6 +239,13 @@ step "管理面板经 Caddy 提供（/healthz、/api/info、/ca.crt）"
 ccurl "$PBASE/api/info" | jcheck - "d['app'] == 'homevault-panel'" || bail "/api/info 异常"
 hdr=$(ccurl -sI "$PBASE/healthz")
 grep -qi '^strict-transport-security: max-age=15552000' <<<"$hdr" || bail "面板缺少 HSTS 头"
+# Caddy csrf_guard: cross-site browser writes never reach the panel (or wg-easy)
+[[ $(http_code -X POST -H 'Sec-Fetch-Site: cross-site' -H 'Content-Type: application/json' -d '{}' "$PBASE/api/auth/password") == 403 ]] ||
+	bail "跨站 POST 未被 Caddy 拒绝"
+[[ $(http_code -X POST -H 'Origin: https://evil.example' -H 'Content-Type: application/json' -d '{}' "$PBASE/api/auth/password") == 403 ]] ||
+	bail "来源（Origin）不符的 POST 未被 Caddy 拒绝"
+[[ $(http_code -X POST -H 'Sec-Fetch-Site: same-origin' -H "Origin: $PBASE" -H 'Content-Type: application/json' -d '{}' "$PBASE/api/auth/password") =~ ^4(00|01|22)$ ]] ||
+	bail "同源 POST 应到达面板（期望 400/401/422）"
 got_ca=''
 for _ in $(seq 30); do # the caddy healthcheck copies root.crt into the ca_public volume
 	got_ca=$(ccurl -f "$PBASE/ca.crt" 2>/dev/null || true)

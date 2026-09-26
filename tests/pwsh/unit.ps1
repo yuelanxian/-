@@ -239,7 +239,7 @@ it's|/tmp/hv-test/it's dir|ro|no|@family
 影视|/tmp/hv-test/movies|ro|yes|alice,bob
 "@
 $linuxRows = @(ConvertFrom-HvStorageConf $linuxConf)
-$linuxPanel = @(Get-HvPanelStatMounts -Rows $linuxRows -StorageConfPath '/tmp/hv-test/storage.conf' -NcDataPath '/tmp/hv-test/nc-data' -BackupPath '/tmp/hv-test/backup')
+$linuxPanel = @(Get-HvPanelStatMounts -Rows $linuxRows -StorageConfPath '/tmp/hv-test/storage.conf' -NcDataPath '/tmp/hv-test/nc-data' -BackupPath '/tmp/hv-test/backup' -StateDir '/tmp/hv-test/state')
 Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.linux.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows $linuxRows -PanelMounts $linuxPanel)
 $winPanel = @(Get-HvPanelStatMounts -Rows $rows -StorageConfPath 'C:\HomeVault\storage.conf' -NcDataPath 'D:\HomeVault\nextcloud-data' -BackupPath 'E:\HomeVault-Backup\restic')
 Write-HvTextFile -Path (Join-Path $OutDir 'compose.storage.windows.yaml') -Content (ConvertTo-HvComposeStorageYaml -Rows $rows -PanelMounts $winPanel)
@@ -377,7 +377,7 @@ Assert-Throws 'repo none' { Get-HvResticRepoArgs ([ordered]@{ HV_BACKUP_TARGET =
 $paths = @(Get-HvBackupPaths -Storages $rows -WinWireGuard $true)
 Assert-Eq 'backup paths' ('/src/nextcloud-html/config|/src/nextcloud-html/custom_apps|/src/nextcloud-html/themes|/src/nextcloud-data|/src/caddy-data|/src/dumps|/src/project|/src/windows-wireguard|/src/storage/' + $rows[1].Slug) ($paths -join '|')
 $ba = (Get-HvResticBackupArgs -Env $be -Paths @('/src/dumps')) -join ' '
-Assert-Eq 'backup args' '-r /repo backup /src/dumps --tag homevault --host homevault --exclude /src/nextcloud-data/appdata_*/preview --exclude /src/nextcloud-data/*.log --exclude /src/project/.git --exclude /src/project/restore' $ba
+Assert-Eq 'backup args' '-r /repo backup /src/dumps --tag homevault --host homevault --exclude /src/nextcloud-data/appdata_*/preview --exclude /src/nextcloud-data/*.log --exclude /src/project/.git --exclude /src/project/restore --exclude /src/project/state/backup.lock' $ba
 Assert-Eq 'forget args' '-r /repo forget --tag homevault --group-by host,tags --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune' ((Get-HvResticForgetArgs $be) -join ' ')
 Assert-Eq 'check args' '-r /repo check --read-data-subset=5%' ((Get-HvResticCheckArgs $be) -join ' ')
 Assert-Eq 'task time' '03:30' (ConvertTo-HvTaskTime '3:30').ToString('HH:mm')

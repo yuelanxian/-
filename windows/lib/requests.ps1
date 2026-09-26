@@ -129,15 +129,32 @@ function Write-HvRequestResult {
 
 function Get-HvPendingRequestFiles {
     param([string]$Dir)
-    if (-not [System.IO.Directory]::Exists($Dir)) { return @() }
+    if (-not [System.IO.Directory]::Exists($Dir) -or (Test-HvReparsePoint $Dir)) { return @() }
     return @(Get-ChildItem -LiteralPath $Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.json' -and -not $_.Name.StartsWith('.') } | Sort-Object Name)
 }
 
 function Remove-HvOldRequestResults {
+    # Keep the newest request/result files in done\ (only regular *.json files; links are never followed).
     param([string]$DoneDir, [int]$Keep = 200)
-    $all = @(Get-ChildItem -LiteralPath $DoneDir -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    if (Test-HvReparsePoint $DoneDir) { return }
+    $all = @(Get-ChildItem -LiteralPath $DoneDir -File -Filter '*.json' -ErrorAction SilentlyContinue |
+            Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 } | Sort-Object LastWriteTime -Descending)
     if ($all.Count -le $Keep) { return }
     foreach ($x in $all[$Keep..($all.Count - 1)]) { try { [System.IO.File]::Delete($x.FullName) } catch { } }
+}
+
+function Get-HvRequestDoneDir {
+    # state\requests\done as a real directory. The panel container can write below state\requests: a link or
+    # file planted as done\ is moved aside (never followed) and the directory re-created, as on Linux.
+    param([string]$RequestsDir)
+    if (Test-HvReparsePoint $RequestsDir) { Stop-Hv ('state\requests 是符号链接/联接点，拒绝处理管理面板请求：' + $RequestsDir) }
+    $done = Join-HvPath $RequestsDir 'done'
+    if ((Test-HvReparsePoint $done) -or [System.IO.File]::Exists($done)) {
+        $aside = Join-HvPath $RequestsDir ('.done-invalid-' + (Get-Date).ToString('yyyyMMddHHmmss', [System.Globalization.CultureInfo]::InvariantCulture) + '-' + (New-HvRandomString 6))
+        Write-HvWarn ('state\requests\done 不是普通目录，已移到 ' + [System.IO.Path]::GetFileName($aside) + ' 并重建。')
+        if ([System.IO.Directory]::Exists($done)) { [System.IO.Directory]::Move($done, $aside) } else { [System.IO.File]::Move($done, $aside) }
+    }
+    return (New-HvDirectory $done)
 }
 
 function Invoke-HvRequestsProcess {
@@ -145,7 +162,7 @@ function Invoke-HvRequestsProcess {
     $dir = Join-HvPath (Get-HvStateDir) 'requests'
     $files = @(Get-HvPendingRequestFiles $dir)
     if ($files.Count -eq 0) { return 0 }
-    $done = New-HvDirectory (Join-HvPath $dir 'done')
+    $done = Get-HvRequestDoneDir $dir
     $n = 0
     $backupResult = $null
     foreach ($f in $files) {

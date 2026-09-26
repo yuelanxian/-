@@ -10,6 +10,8 @@ https://{$HV_HOST}:{$HV_ADMIN_PORT} {
 		header Strict-Transport-Security "max-age=15552000"
 		header -Server
 
+		# wg-easy 没有 CSRF 防护：拒绝浏览器的跨站写请求（见 Caddyfile 的 csrf_guard）
+		import csrf_guard
 		reverse_proxy wg-easy:51821
 	}
 }

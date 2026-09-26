@@ -125,6 +125,17 @@ function Invoke-HvCmdLogs {
     [void](Invoke-HvCompose -Arguments $a -AllowFailure)
 }
 
+function Invoke-HvCmdCompose {
+    # hv.ps1 compose <args...>: docker compose with HomeVault's files, --env-file and profiles (all arguments passed on).
+    param([object[]]$Arguments = @())
+    Assert-HvDockerQuick
+    $a = @()
+    foreach ($x in @($Arguments)) { $a += (ConvertTo-HvArgString $x) }
+    if ($a.Count -eq 0) { Stop-Hv '用法：compose <docker compose 参数>，例如 compose ps' 2 }
+    $r = Invoke-HvCompose -Arguments $a -AllowFailure
+    if ($r.ExitCode -ne 0) { $script:HvExitCode = $r.ExitCode }
+}
+
 function Invoke-HvCmdPull {
     param([object[]]$Arguments = @())
     [void](Read-HvCommandArgs -Arguments $Arguments)
@@ -140,6 +151,7 @@ function Invoke-HvCmdUpdate {
     $p = Read-HvCommandArgs -Arguments $Arguments -Switches @('major', 'skip-backup')
     [void](Assert-HvDocker)
     $envv = Get-HvEnv
+    $next = ''
     if (Test-HvOpt $p 'major') {
         $img = Get-HvEnvDictValue $envv 'NEXTCLOUD_IMAGE'
         $next = Get-HvNextMajorImage $img
@@ -150,13 +162,15 @@ function Invoke-HvCmdUpdate {
         }
         Write-HvWarn ('大版本升级：' + $img + ' → ' + $next + '（Nextcloud 只能逐个大版本升级；请先确认所用应用已支持新版本）')
         if (-not (Read-HvYesNo '继续？' $false)) { Stop-Hv '已取消。' }
-        Update-HvEnv ([ordered]@{ NEXTCLOUD_IMAGE = $next })
     }
+    # backup first, and only then switch .env to the next major (a failed backup must not leave the new image
+    # configured: the next `up` would upgrade Nextcloud without a backup)
     if (-not (Test-HvOpt $p 'skip-backup')) {
         $t = Get-HvEnvValue 'HV_BACKUP_TARGET'
         if ($t -eq 'local' -or $t -eq 's3') { Invoke-HvBackup }
         elseif (-not (Read-HvYesNo '未配置备份，升级前无法自动备份。仍然继续？' $false)) { Stop-Hv '已取消。' }
     }
+    if ($next) { Update-HvEnv ([ordered]@{ NEXTCLOUD_IMAGE = $next }) }
     Update-HvDerivedEnv
     Initialize-HvRuntimeDirs
     [void](Write-HvComposeStorageFile)

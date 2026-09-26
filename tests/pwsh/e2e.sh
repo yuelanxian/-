@@ -6,7 +6,7 @@
 # Covers: install --config-only, up --wait, status, occ, storage add/apply/remove (files_external sync),
 # user add, harden, ca --export, backup --init (+ state/backup-status.json, snapshots.json, backup log),
 # management panel (built image, stat mounts, /healthz through Caddy), CLI log, restore (list/--ls/--files/--full), down.
-# Env: HV_E2E_KEEP=1 keep the temp dir and the stack; HV_E2E_PROJECT (default hvwin-e2e);
+# Env: HV_E2E_KEEP=1 keep the temp dir and the stack; HV_E2E_PROJECT (default hvwin-e2e); HV_E2E_SUBNET (default 172.31.207.0/24);
 #      HV_E2E_PORT_BASE (default 28440 -> https 28443, http 28480, admin 28444, panel 28445).
 set -euo pipefail
 
@@ -14,6 +14,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 IMAGE=${HV_PWSH_IMAGE:-mcr.microsoft.com/powershell:latest}
 PROJECT=${HV_E2E_PROJECT:-hvwin-e2e}
 BASE=${HV_E2E_PORT_BASE:-28440}
+SUBNET=${HV_E2E_SUBNET:-172.31.207.0/24}
 HTTPS=$((BASE + 3)) HTTP=$((BASE + 40)) ADMIN=$((BASE + 4)) PANEL=$((BASE + 5))
 DOCKER_BIN=$(command -v docker)
 PLUGIN=""
@@ -89,7 +90,7 @@ hv install --config-only --non-interactive --host 127.0.0.1 --lan-ip 127.0.0.1 -
 	--storage "照片|$W/photos|rw|yes|" || bad "install --config-only"
 LOGS=$R/hvdata/logs
 # test-host tweaks: unique project/subnet; Linux bind mount must be writable by www-data (33)
-sed -i "s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=$PROJECT/; s#^HV_FRONTEND_SUBNET=.*#HV_FRONTEND_SUBNET=172.31.207.0/24#" "$R/.env"
+sed -i "s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=$PROJECT/; s#^HV_FRONTEND_SUBNET=.*#HV_FRONTEND_SUBNET=$SUBNET#" "$R/.env"
 docker run --rm -v "$W":"$W" alpine:3 chown -R 33:33 "$R/hvdata/nextcloud-data" "$W/photos" "$W/docs" "$LOGS/nextcloud"
 # Linux only (Docker Desktop bind mounts have no uid checks): the panel (uid 65532) writes its audit log and requests
 docker run --rm -v "$W":"$W" alpine:3 chown -R 65532:65532 "$LOGS/panel" "$R/state/requests"
@@ -110,6 +111,10 @@ done
 expect "panel container healthy ($panel_state)" test "$panel_state" = healthy
 mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$PROJECT-panel-1" 2>/dev/null || true)
 for t in /stat/data /stat/backup /config/storage.conf; do expect "panel mount $t read-only" has "$mounts" "$t false"; done
+# state/ read-only for the panel; only state/requests writable (done/ read-only again)
+expect "panel mount /state read-only" has "$mounts" "/state false"
+expect "panel mount /state/requests writable" has "$mounts" "/state/requests true"
+expect "panel mount /state/requests/done read-only" has "$mounts" "/state/requests/done false"
 expect "panel mount /stat/storage/<slug>" has "$mounts" "/stat/storage/s"
 hz=$(curl -sk --max-time 10 "https://127.0.0.1:$PANEL/healthz" || true)
 expect "panel /healthz through Caddy on the panel port" test "$hz" = ok

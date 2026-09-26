@@ -334,6 +334,10 @@ if penv.get("DOCKER_HOST") != "tcp://socket-proxy:2375":
     errs.append("panel: DOCKER_HOST must be tcp://socket-proxy:2375")
 if penv.get("CA_CERT_FILE") != "/ca/root.crt":
     errs.append("panel: CA_CERT_FILE must be /ca/root.crt")
+ce = s["caddy"].get("environment") or {}
+em = ce.get("HV_ACME_EMAIL") or ""
+if (ce.get("HV_ACME_EMAIL_DIRECTIVE") or "") != (("email " + em) if em else ""):
+    errs.append("caddy: HV_ACME_EMAIL_DIRECTIVE=%r for HV_ACME_EMAIL=%r" % (ce.get("HV_ACME_EMAIL_DIRECTIVE"), em))
 hc = (p.get("healthcheck") or {}).get("test") or []
 if "/panel" not in hc or "healthcheck" not in hc:
     errs.append("panel healthcheck: %s" % hc)
@@ -361,6 +365,7 @@ caddy_validate() { # image tls_snippet admin_snippet site_addresses host [extra 
 		-e HV_ALLOWED_CIDRS='private_ranges 100.64.0.0/10' \
 		-e HV_HTTP_PORT=80 -e HV_HTTPS_PORT=443 -e HV_ADMIN_PORT=8443 -e HV_PANEL_PORT=9443 -e HV_LOG_RETENTION_DAYS=7 \
 		-e HV_TLS_SNIPPET="$tls" -e HV_ADMIN_SNIPPET="$admin" -e HV_ACME_EMAIL=hv-lint@homevault.test \
+		-e HV_ACME_EMAIL_DIRECTIVE="${CADDY_EMAIL_DIRECTIVE-email hv-lint@homevault.test}" \
 		"$@" "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$TMP/caddy.out" 2>&1
 }
 
@@ -442,6 +447,15 @@ else
 					fail "validate tls-acme-$p admin=$admin: $(tail -n 3 "$TMP/caddy.out")"
 				fi
 			done
+			# HV_ACME_EMAIL is optional (install allows it empty): no "email" directive at all
+			if CADDY_EMAIL_DIRECTIVE='' caddy_validate "$ACME_IMAGE" "acme-$p" none 'https://nas.homevault.test:443' nas.homevault.test \
+				-e ALIYUN_ACCESS_KEY_ID=dummy -e ALIYUN_ACCESS_KEY_SECRET=dummy \
+				-e TENCENTCLOUD_SECRET_ID=dummy -e TENCENTCLOUD_SECRET_KEY=dummy \
+				-e CF_API_TOKEN=dummy-cloudflare-token-0123456789abcdef; then
+				ok "validate tls-acme-$p without HV_ACME_EMAIL"
+			else
+				fail "validate tls-acme-$p without HV_ACME_EMAIL: $(tail -n 3 "$TMP/caddy.out")"
+			fi
 		done
 	fi
 fi
