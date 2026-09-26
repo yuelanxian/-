@@ -17,7 +17,8 @@
 #                               logs/ = HV_LOG_DIR like "hv logs" creates it: nextcloud 33:33, panel 65532)
 #   --tls-mode M                internal | acme-alidns | acme-tencentcloud | acme-cloudflare (default internal)
 #   --project NAME              COMPOSE_PROJECT_NAME, default hvtest
-#   --subnet CIDR               HV_FRONTEND_SUBNET, default 172.31.250.0/24
+#   --subnet CIDR               HV_FRONTEND_SUBNET, default 172.31.250.0/24 (HV_CADDY_IP / HV_PANEL_IP /
+#                               HV_FRONTEND_IP_RANGE derived from it)
 #   --allowed-cidrs STR         HV_ALLOWED_CIDRS, default from .env.example
 #   --vpn                       HV_VPN_ENABLED=true + HV_ADMIN_SNIPPET=wgeasy (Linux only; default: VPN off)
 #   --no-chown                  do not chown nextcloud-data / logs (static checks only)
@@ -114,6 +115,18 @@ site_addresses=$(printf '%s, ' "${sites[@]}")
 site_addresses=${site_addresses%, }
 cli_url="https://$host"
 [[ $https_port == 443 ]] || cli_url+=":$https_port"
+# fixed frontend addresses (same rule as the CLIs): Caddy = network+2, panel = network+3, ip_range = upper half
+ip2int() {
+	local IFS=. a b c d
+	read -r a b c d <<<"$1"
+	echo $(((a << 24) | (b << 16) | (c << 8) | d))
+}
+int2ip() { echo "$((($1 >> 24) & 255)).$((($1 >> 16) & 255)).$((($1 >> 8) & 255)).$(($1 & 255))"; }
+sub_len=${subnet#*/}
+sub_base=$(($(ip2int "${subnet%/*}") & ((0xFFFFFFFF << (32 - sub_len)) & 0xFFFFFFFF)))
+caddy_ip=$(int2ip $((sub_base + 2)))
+panel_ip=$(int2ip $((sub_base + 3)))
+ip_range="$(int2ip $((sub_base + (1 << (31 - sub_len)))))/$((sub_len + 1))"
 admin_snippet=none
 vpn_enabled=false
 if [[ $vpn == 1 && $platform == linux ]]; then
@@ -153,6 +166,9 @@ set_kv HV_ADMIN_PORT "$admin_port"
 set_kv HV_PANEL_PORT "$panel_port"
 [[ -z $allowed ]] || set_kv HV_ALLOWED_CIDRS "$allowed"
 set_kv HV_FRONTEND_SUBNET "$subnet"
+set_kv HV_CADDY_IP "$caddy_ip"
+set_kv HV_PANEL_IP "$panel_ip"
+set_kv HV_FRONTEND_IP_RANGE "$ip_range"
 set_kv HV_SITE_ADDRESSES "$site_addresses"
 set_kv HV_TRUSTED_DOMAINS "${trusted[*]}"
 set_kv HV_OVERWRITE_CLI_URL "$cli_url"
@@ -181,12 +197,18 @@ for s in postgres_password redis_password nextcloud_admin_password restic_passwo
 	[[ -s $target/secrets/$s ]] || rand32 >"$target/secrets/$s"
 	chmod 0644 "$target/secrets/$s"
 done
+# DNS provider credentials: one file per value in secrets/caddy-dns/ (mounted by compose.acme.yaml)
+dns_file() {
+	mkdir -p "$target/secrets/caddy-dns"
+	chmod 0755 "$target/secrets/caddy-dns"
+	printf '%s\n' "$2" >"$target/secrets/caddy-dns/$1"
+	chmod 0644 "$target/secrets/caddy-dns/$1"
+}
 case "$tls_mode" in
-acme-alidns) printf 'ALIYUN_ACCESS_KEY_ID=dummy-id\nALIYUN_ACCESS_KEY_SECRET=dummy-secret\n' >"$target/secrets/caddy-dns.env" ;;
-acme-tencentcloud) printf 'TENCENTCLOUD_SECRET_ID=dummy-id\nTENCENTCLOUD_SECRET_KEY=dummy-key\n' >"$target/secrets/caddy-dns.env" ;;
-acme-cloudflare) printf 'CF_API_TOKEN=dummy-cloudflare-token-0123456789abcdef\n' >"$target/secrets/caddy-dns.env" ;;
+acme-alidns) dns_file ALIYUN_ACCESS_KEY_ID dummy-id && dns_file ALIYUN_ACCESS_KEY_SECRET dummy-secret ;;
+acme-tencentcloud) dns_file TENCENTCLOUD_SECRET_ID dummy-id && dns_file TENCENTCLOUD_SECRET_KEY dummy-key ;;
+acme-cloudflare) dns_file CF_API_TOKEN dummy-cloudflare-token-0123456789abcdef ;;
 esac
-[[ ! -f $target/secrets/caddy-dns.env ]] || chmod 0644 "$target/secrets/caddy-dns.env"
 
 # ---------------------------------------------------------------- data dirs
 mkdir -p "$data_dir/nextcloud-data" "$data_dir/dumps" "$data_dir/backup-repo"

@@ -277,7 +277,7 @@ else
 			--profile vpn --profile ddns --profile tools --profile monitor config --format json >"$d/config.json" 2>/dev/null
 		if ! have python3; then
 			warn "$platform: python3 not available: panel/socket-proxy hardening not checked"
-		elif msg=$(python3 - "$d/config.json" <<'PYCHECK'
+		elif msg=$(python3 - "$d/config.json" "$d/.env" <<'PYCHECK'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 s, nets = d["services"], d["networks"]
@@ -341,13 +341,58 @@ if (ce.get("HV_ACME_EMAIL_DIRECTIVE") or "") != (("email " + em) if em else ""):
 hc = (p.get("healthcheck") or {}).get("test") or []
 if "/panel" not in hc or "healthcheck" not in hc:
     errs.append("panel healthcheck: %s" % hc)
+# only Caddy (and the panel, for Nextcloud) are trusted proxies, at fixed addresses outside the dynamic ip_range
+env_file = {}
+for line in open(sys.argv[2], encoding="utf-8"):
+    if "=" in line and not line.lstrip().startswith("#"):
+        k, v = line.rstrip("\n").split("=", 1)
+        env_file[k.strip()] = v.strip().strip("'")
+cip, pip = env_file.get("HV_CADDY_IP"), env_file.get("HV_PANEL_IP")
+if ((s["caddy"].get("networks") or {}).get("frontend") or {}).get("ipv4_address") != cip:
+    errs.append("caddy: frontend ipv4_address must be HV_CADDY_IP (%s)" % cip)
+if ((p.get("networks") or {}).get("frontend") or {}).get("ipv4_address") != pip:
+    errs.append("panel: frontend ipv4_address must be HV_PANEL_IP (%s)" % pip)
+if penv.get("PANEL_TRUSTED_PROXIES") != cip + "/32":
+    errs.append("panel: PANEL_TRUSTED_PROXIES=%r (want %s/32)" % (penv.get("PANEL_TRUSTED_PROXIES"), cip))
+for name in ("app", "cron"):
+    tp = (s[name].get("environment") or {}).get("TRUSTED_PROXIES")
+    if sorted((tp or "").split()) != sorted([cip + "/32", pip + "/32"]):
+        errs.append("%s: TRUSTED_PROXIES=%r (want Caddy + panel /32)" % (name, tp))
+ipam = (nets.get("frontend", {}).get("ipam") or {}).get("config") or [{}]
+if ipam[0].get("subnet") != env_file.get("HV_FRONTEND_SUBNET") or ipam[0].get("ip_range") != env_file.get("HV_FRONTEND_IP_RANGE"):
+    errs.append("frontend ipam: %s" % ipam)
+# the Nextcloud data directory is never auto-created (unmounted data disk)
+for name, target in (("app", "/var/www/data"), ("cron", "/var/www/data"), ("backup", "/src/nextcloud-data")):
+    m = [v for v in vols(name) if v.get("target") == target]
+    if len(m) != 1 or m[0].get("type") != "bind" or (m[0].get("bind") or {}).get("create_host_path") is not False:
+        errs.append("%s: %s must be a bind with create_host_path: false (%s)" % (name, target, m))
+# DNS API credentials never reach a container environment
+for name in s:
+    for k in (s[name].get("environment") or {}):
+        if k.startswith(("ALIYUN_", "TENCENTCLOUD_", "CF_API")):
+            errs.append(name + ": DNS credential %s in the environment" % k)
+if "env_file" in s["caddy"]:
+    errs.append("caddy: env_file must not be used (DNS credentials are files)")
 print("; ".join(errs))
 sys.exit(1 if errs else 0)
 PYCHECK
 		); then
-			ok "$platform: panel / socket-proxy hardening"
+			ok "$platform: panel / socket-proxy hardening, trusted proxies, data bind, no DNS credentials in env"
 		else
 			fail "$platform: $msg"
+		fi
+		# domain mode: DNS credential files mounted read-only, the directory never auto-created
+		if have python3 && json=$(docker compose --project-directory "$d" -f "$d/compose.yaml" -f "$d/compose.acme.yaml" \
+			--env-file "$d/.env" config --format json 2>/dev/null) &&
+			python3 -c '
+import json, sys
+v = [m for m in json.load(sys.stdin)["services"]["caddy"]["volumes"] if m.get("target") == "/run/secrets/caddy-dns"]
+ok = len(v) == 1 and v[0].get("read_only") and v[0].get("type") == "bind" and (v[0].get("bind") or {}).get("create_host_path") is False \
+    and str(v[0].get("source", "")).endswith("/secrets/caddy-dns")
+sys.exit(0 if ok else 1)' <<<"$json"; then
+			ok "$platform: compose.acme.yaml mounts secrets/caddy-dns read-only at /run/secrets/caddy-dns"
+		else
+			fail "$platform: compose.acme.yaml must mount ./secrets/caddy-dns read-only (create_host_path: false)"
 		fi
 	done
 fi
@@ -436,27 +481,44 @@ else
 		else
 			fail "$ACME_IMAGE: expected 3 DNS provider modules, found $mods"
 		fi
+		# DNS credentials are files (compose.acme.yaml mounts secrets/caddy-dns at /run/secrets/caddy-dns, read
+		# with {file.*}), never environment variables. CRLF endings (Windows editors) must work too.
+		dns_dir=$TMP/caddy-dns
+		mkdir -p "$dns_dir"
+		printf 'dummy-id\n' >"$dns_dir/ALIYUN_ACCESS_KEY_ID"
+		printf 'dummy-secret\r\n' >"$dns_dir/ALIYUN_ACCESS_KEY_SECRET"
+		printf 'dummy-id\n' >"$dns_dir/TENCENTCLOUD_SECRET_ID"
+		printf 'dummy-key' >"$dns_dir/TENCENTCLOUD_SECRET_KEY"
+		printf 'dummy-cloudflare-token-0123456789abcdef\r\n' >"$dns_dir/CF_API_TOKEN"
+		chmod 0755 "$dns_dir"
+		chmod 0644 "$dns_dir"/*
+		dns_mount=(-v "$dns_dir:/run/secrets/caddy-dns:ro")
+		if grep -nE '\{env\.(ALIYUN|TENCENTCLOUD|CF_)' caddy/snippets/*.caddy; then
+			fail "acme snippets must read DNS credentials with {file./run/secrets/caddy-dns/...}, not {env.*}"
+		fi
 		for p in alidns tencentcloud cloudflare; do
 			for admin in none wgeasy; do
-				if caddy_validate "$ACME_IMAGE" "acme-$p" "$admin" 'https://nas.homevault.test:443' nas.homevault.test \
-					-e ALIYUN_ACCESS_KEY_ID=dummy -e ALIYUN_ACCESS_KEY_SECRET=dummy \
-					-e TENCENTCLOUD_SECRET_ID=dummy -e TENCENTCLOUD_SECRET_KEY=dummy \
-					-e CF_API_TOKEN=dummy-cloudflare-token-0123456789abcdef; then
+				if caddy_validate "$ACME_IMAGE" "acme-$p" "$admin" 'https://nas.homevault.test:443' nas.homevault.test "${dns_mount[@]}"; then
 					ok "validate tls-acme-$p admin=$admin"
 				else
 					fail "validate tls-acme-$p admin=$admin: $(tail -n 3 "$TMP/caddy.out")"
 				fi
 			done
 			# HV_ACME_EMAIL is optional (install allows it empty): no "email" directive at all
-			if CADDY_EMAIL_DIRECTIVE='' caddy_validate "$ACME_IMAGE" "acme-$p" none 'https://nas.homevault.test:443' nas.homevault.test \
-				-e ALIYUN_ACCESS_KEY_ID=dummy -e ALIYUN_ACCESS_KEY_SECRET=dummy \
-				-e TENCENTCLOUD_SECRET_ID=dummy -e TENCENTCLOUD_SECRET_KEY=dummy \
-				-e CF_API_TOKEN=dummy-cloudflare-token-0123456789abcdef; then
+			if CADDY_EMAIL_DIRECTIVE='' caddy_validate "$ACME_IMAGE" "acme-$p" none 'https://nas.homevault.test:443' nas.homevault.test "${dns_mount[@]}"; then
 				ok "validate tls-acme-$p without HV_ACME_EMAIL"
 			else
 				fail "validate tls-acme-$p without HV_ACME_EMAIL: $(tail -n 3 "$TMP/caddy.out")"
 			fi
 		done
+		# proves the {file.*} placeholder is resolved at provision time (cloudflare checks the token format)
+		if caddy_validate "$ACME_IMAGE" acme-cloudflare none 'https://nas.homevault.test:443' nas.homevault.test; then
+			fail "tls-acme-cloudflare validated without the credential file (placeholder not read from the file?)"
+		elif grep -q "API token '' appears invalid" "$TMP/caddy.out"; then
+			ok "tls-acme-cloudflare without secrets/caddy-dns/CF_API_TOKEN is rejected (credential read from the file)"
+		else
+			fail "tls-acme-cloudflare without the credential file: unexpected error $(tail -n 2 "$TMP/caddy.out")"
+		fi
 	fi
 fi
 

@@ -341,6 +341,9 @@ F:   备份   NTFS     4.5 TB   4.5 TB   3         HDD     否     是  关
 
 `storage apply` 同时会让管理面板能统计这些硬盘的容量（只读挂载，面板不读取文件内容）。
 
+- 挂载有变化时，`apply` 会**重建容器**，包括管理面板：面板的登录会话只保存在内存里，已登录面板（和安卓管理 App）的人需要重新登录。
+- 额外存储里的文件，能看到这个存储的家人都能读到（`rw` 时还能修改）。所以**不要**选择系统文件夹（`C:\Windows`、`C:\Program Files` 等）、整个盘的根目录，也不要选择和 HomeVault 自己的文件夹重叠的位置：HomeVault 程序目录（含 `secrets\` 密钥）、Nextcloud 数据目录、日志目录、备份仓库。
+
 ---
 
 ## 7. 开机自启链：停电来电后能自己恢复
@@ -412,6 +415,7 @@ flowchart TD
 | `HomeVault-Requests` | 每 2 分钟，以已登录的 HomeVault 账户身份，后台无窗口 | 运行 `hv.ps1 requests process`：执行管理面板提交的请求（立即备份、清理日志、修改保留天数），只执行这三种；同时更新 `state\status.json` |
 | `HomeVault-VpnStatus` | 开机时、之后每 2 分钟（以 SYSTEM 身份，启用 VPN 时才有） | 把各 VPN 设备的最近握手时间和流量写入 `state\vpn-status.json`（管理面板的 VPN 页用），里面不含任何密钥 |
 
+- 不想等计划任务时，也可以在管理员 PowerShell 里手动运行：`.\windows\hv.ps1 requests process`（立即执行面板提交的请求）、`.\windows\hv.ps1 status-update`（立即刷新面板读取的状态文件）、`.\windows\hv.ps1 maintenance`（每日维护）。
 - 在任务上右键 → **运行**，可以立即执行一次；选中任务后看下方的"**历史记录**"标签（需要先在右侧点"启用所有任务历史记录"），可以看到每次运行的结果。
 - 不要手动修改或删除这些任务。需要修改备份时间，运行 `.\windows\hv.ps1 schedule-backup --time 04:00`；删掉了某个任务，重新双击 `一键安装.cmd` 即可恢复（`HomeVault-Backup` 也可以用 `schedule-backup` 单独恢复）。
 

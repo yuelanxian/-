@@ -142,8 +142,8 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query url.
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
 	req.Header.Set("Accept", "application/json")
-	// The panel is a trusted proxy for Nextcloud (same frontend subnet): pass the real
-	// client IP so Nextcloud's brute-force protection and audit log see it.
+	// The panel is a trusted proxy for Nextcloud (fixed address HV_PANEL_IP in its TRUSTED_PROXIES):
+	// pass the real client IP so Nextcloud's brute-force protection and audit log see it.
 	if clientIP != "" {
 		req.Header.Set("X-Forwarded-For", clientIP)
 	}

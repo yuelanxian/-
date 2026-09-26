@@ -60,7 +60,9 @@ HomeVault 自带的轻量管理面板，也是安卓应用「HomeVault 家庭归
 | 修改了日志保留天数但显示的还是旧值 | 请求要等主机处理（Linux 几秒，Windows 最多约 2 分钟），处理后刷新页面即可。 |
 | 打开日志提示「管理面板没有权限读取该日志文件」 | Linux 宿主机缺少 `setfacl`：安装 `acl`（`apt install acl` / `dnf install acl`）后运行 `sudo ./hv up`。 |
 | 在面板里重启「HTTPS 网关（Caddy）」后页面短暂打不开 | 正常：面板本身经过 Caddy，重启期间连接会中断几秒钟，之后刷新即可。 |
-| 电脑给 Docker 配置了代理 | 不影响面板：Compose 会把代理设置注入容器，但面板访问 Nextcloud 和 Docker 时始终直连。 |
+| 给 Docker 客户端配置了代理（`~/.docker/config.json` 的 `proxies`）后面板打不开（502） | Compose 会把代理变量注入每个容器；面板自己访问 Nextcloud 和 Docker 时始终直连，但 Caddy 转发到 `panel`、`app`、`wg-easy` 时会走代理。只给 Docker 守护进程配代理，或把服务名加入 `noProxy`，见 `docs/09-常见问题.md` §1.7。 |
+| 增删额外存储、更新或重启后要求重新登录 | 正常：会话只保存在面板进程的内存里，面板容器重建或重启后需要重新登录。 |
+| 操作时提示「跨站请求已拒绝」（403） | Caddy 拒绝浏览器从其他网站 / 其他端口发来的修改类请求（面板 9443、wg-easy 8443 都有这层保护）。直接在地址栏打开面板再操作；必要时关闭相关浏览器扩展。 |
 
 ## 开发者
 

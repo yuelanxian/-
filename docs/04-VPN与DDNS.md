@@ -275,7 +275,7 @@ sudo ./hv vpn status     # 同上，并显示 wg-easy 容器状态
 sudo ./hv vpn reset-password     # 生成新密码（同时清除二步验证），新密码写入原来的密码文件
 ```
 
-**访问范围（`HV_VPN_LAN_ACCESS`）：** 默认 `host`，VPN 设备只能访问 HomeVault 主机。确实需要在外访问家里的其他设备（NAS、路由器管理页等）时才改成 `full`，风险说明见 [docs/01-架构与安全.md](01-架构与安全.md) §3.5。修改方法：
+**访问范围（`HV_VPN_LAN_ACCESS`）：** 默认 `host`，VPN 设备只能访问 HomeVault 主机。确实需要在外访问家里的其他设备（NAS、路由器管理页等）时才改成 `full`，风险说明见 [docs/01-架构与安全.md](01-架构与安全.md) §3.5。`full` 也只放行**家庭局域网**（`HV_LAN_CIDR`）：Docker 内部网络（`HV_FRONTEND_SUBNET`）和互联网一律不转发，所以它不是"经家里上网"的全局 VPN。修改方法：
 
 1. 在 `.env` 里设置 `HV_VPN_LAN_ACCESS=full`；
 2. 运行 `sudo ./hv vpn finalize`。如果已经启用了二步验证，命令会打印需要在 wg-easy 网页上手动修改的内容（Allowed IPs 和 Hooks），照着改完后运行 `sudo ./hv vpn finalize --skip-api`；
@@ -339,7 +339,7 @@ Endpoint = vpn.example.com:34567     # WG_HOST:WG_PORT
 
 好处：刷视频、微信等流量不绕道家里，**不耗家里的上行带宽，也更省电**；VPN 一直开着也不影响正常上网。
 
-⚠️ **不要**把手机上的 AllowedIPs 改成 `0.0.0.0/0`（"全局代理"）。在 `host` 模式下，服务器会丢弃除 HomeVault 主机以外的所有转发流量，手机会立刻上不了网。WireGuard 官方 App 里的"排除局域网"选项只在 `0.0.0.0/0` 时才有意义，HomeVault 用不到。
+⚠️ **不要**把手机上的 AllowedIPs 改成 `0.0.0.0/0`（"全局代理"）。服务器只转发去 HomeVault 主机（`host`）或家庭局域网（`full`）的流量，去互联网的一律丢弃，手机会立刻上不了网。WireGuard 官方 App 里的"排除局域网"选项只在 `0.0.0.0/0` 时才有意义，HomeVault 用不到。
 
 ### 5.2 DNS
 

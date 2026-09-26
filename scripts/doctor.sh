@@ -127,11 +127,45 @@ doctor_nextcloud() {
 	fi
 }
 
+# Nextcloud data directory: compose never creates it (create_host_path: false), so a missing or empty
+# directory means the data disk is not mounted — explain instead of letting the app container fail.
+doctor_ncdata() {
+	local p=${HV_NC_DATA_PATH:-}
+	if [[ $p != /* ]]; then
+		doc_fail "HV_NC_DATA_PATH 未设置或不是绝对路径：${p:-（空）}"
+		return 0
+	fi
+	if [[ ! -d $p ]]; then
+		doc_fail "Nextcloud 文件目录不存在：$p —— 数据盘可能没有挂载（检查 lsblk、findmnt、/etc/fstab；挂载：sudo mount -a）。为避免把文件写到系统盘，HomeVault 不会自动创建它；挂载后运行 sudo $HV_SELF up"
+	elif [[ -f $HV_STATE_DIR/installed && ! -e $p/.ncdata ]]; then
+		doc_fail "Nextcloud 文件目录中没有 .ncdata：$p —— 数据盘可能没有挂载到这里，或目录被换成了空目录（检查 findmnt $p；挂载后运行 sudo $HV_SELF up）"
+	else
+		doc_ok "Nextcloud 文件目录：$p"
+	fi
+}
+
+# Only Caddy (fixed address) and the panel are trusted proxies for Nextcloud / the panel
+doctor_proxy() {
+	local cid ip net=${COMPOSE_PROJECT_NAME}_frontend
+	cid=$(dc_cid caddy)
+	[[ -n $cid && -n ${HV_CADDY_IP:-} ]] || return 0
+	ip=$(docker inspect -f "{{with index .NetworkSettings.Networks \"$net\"}}{{.IPAddress}}{{end}}" "$cid" 2>/dev/null || true)
+	if [[ -z $ip ]]; then
+		return 0
+	elif [[ $ip == "$HV_CADDY_IP" ]]; then
+		doc_ok "Caddy 固定地址 $ip（Nextcloud / 管理面板只信任它转发的客户端 IP）"
+	else
+		doc_fail "Caddy 的地址是 $ip，而 HV_CADDY_IP=$HV_CADDY_IP：Nextcloud 将看不到真实客户端 IP（sudo $HV_SELF up 重建）"
+	fi
+}
+
 doctor_disks() {
 	local label path st total free pct i
 	storage_parse_conf >/dev/null 2>&1 || true
 	while IFS=$'\t' read -r label path; do
 		[[ -n $path ]] || continue
+		# a missing primary data directory is reported (with a hint) by doctor_ncdata
+		[[ $label == 主数据 && ! -d $path ]] && continue
 		if [[ ! -d $path ]]; then
 			doc_fail "$label 目录不存在：$path（硬盘未挂载？）"
 			continue
@@ -218,13 +252,22 @@ doctor_perms() {
 	if [[ -d $HV_ROOT/secrets ]]; then
 		m=$(stat -c %a "$HV_ROOT/secrets")
 		if [[ $m == 700 ]]; then doc_ok "secrets/ 目录权限 700"; else doc_fail "secrets/ 目录权限为 $m（应为 700：chmod 700 secrets）"; fi
-		for f in "$HV_ROOT"/secrets/*; do
-			[[ -f $f ]] || continue
+		for f in "$HV_ROOT"/secrets/* "$HV_ROOT"/secrets/caddy-dns "$HV_ROOT"/secrets/caddy-dns/*; do
+			[[ -e $f ]] || continue
 			m=$(stat -c %a "$f")
 			((8#$m & 8#022)) && doc_fail "密钥文件可被他人写入：$f（$m）"
 		done
 	else
 		doc_fail "secrets/ 目录不存在"
+	fi
+	[[ -f $HV_ROOT/secrets/caddy-dns.env ]] &&
+		doc_warn "旧的 secrets/caddy-dns.env 仍然存在（DNS 凭据会以环境变量传给 Caddy 的旧方式）：运行 sudo $HV_SELF up 自动迁移到 secrets/caddy-dns/"
+	if [[ ${HV_TLS_MODE:-internal} == acme-dns ]]; then
+		if caddy_dns_have_creds "${HV_DNS_PROVIDER:-}"; then
+			doc_ok "DNS API 凭据文件齐全（secrets/caddy-dns/，$HV_DNS_PROVIDER）"
+		else
+			doc_fail "域名模式缺少 DNS API 凭据文件：$(caddy_dns_keys "${HV_DNS_PROVIDER:-}" | sed 's#^#secrets/caddy-dns/#' | paste -sd ' ' -)（sudo $HV_SELF install 重新输入）"
+		fi
 	fi
 	[[ -f $HV_ROOT/secrets/wg-easy-init.env && -f $HV_STATE_DIR/wg-easy-finalized ]] &&
 		doc_warn "secrets/wg-easy-init.env 仍然存在（sudo $HV_SELF vpn finalize --skip-api 会删除它）"
@@ -315,6 +358,7 @@ cmd_doctor() {
 		doc_ok "Docker $(docker version -f '{{.Server.Version}}' 2>/dev/null)，Compose $(docker compose version --short 2>/dev/null)"
 		doctor_containers
 		doctor_ports
+		doctor_proxy
 		[[ $(dc_state app) == healthy || $(dc_state app) == running ]] && doctor_nextcloud
 		doctor_tls
 		doctor_panel
@@ -322,6 +366,7 @@ cmd_doctor() {
 	fi
 	doctor_logs
 	doctor_firewall
+	doctor_ncdata
 	doctor_disks
 	doctor_backup
 	doctor_perms

@@ -27,9 +27,10 @@ x-nextcloud: &nextcloud
     NEXTCLOUD_TRUSTED_DOMAINS: ${HV_TRUSTED_DOMAINS:-}
     REDIS_HOST: redis
     REDIS_HOST_PASSWORD_FILE: /run/secrets/redis_password
-    # 任何值都会关闭 Apache remoteip（防止伪造 X-Real-IP）；真实客户端 IP 由 TRUSTED_PROXIES + X-Forwarded-For 提供
+    # 任何值都会关闭 Apache remoteip（防止伪造 X-Real-IP）；真实客户端 IP 由 TRUSTED_PROXIES + X-Forwarded-For 提供。
+    # 只信任 Caddy 与管理面板的固定地址（前端网络里的 wg-easy、ddns-go、备份等容器不能伪造 X-Forwarded-For）
     APACHE_DISABLE_REWRITE_IP: "1"
-    TRUSTED_PROXIES: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+    TRUSTED_PROXIES: ${HV_CADDY_IP:-172.31.250.2}/32 ${HV_PANEL_IP:-172.31.250.3}/32
     OVERWRITEPROTOCOL: https
     OVERWRITECLIURL: ${HV_OVERWRITE_CLI_URL:-}
     PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-1G}
@@ -56,7 +57,12 @@ x-nextcloud: &nextcloud
     - nextcloud_admin_password
   volumes:
     - ${HV_VOL_HTML:-nc_html}:/var/www/html
-    - ${HV_NC_DATA_PATH:?HV_NC_DATA_PATH 未设置（Nextcloud 数据目录），请先运行 hv install}:/var/www/data
+    # 数据盘未挂载时绝不自动创建空目录（否则文件会悄悄写到系统盘）：目录不存在则容器无法启动
+    - type: bind
+      source: ${HV_NC_DATA_PATH:?HV_NC_DATA_PATH 未设置（Nextcloud 数据目录），请先运行 hv install}
+      target: /var/www/data
+      bind:
+        create_host_path: false
     - ./nextcloud/hooks/pre-installation:/docker-entrypoint-hooks.d/pre-installation:ro
     - ./nextcloud/hooks/post-installation:/docker-entrypoint-hooks.d/post-installation:ro
     - ./nextcloud/hooks/before-starting:/docker-entrypoint-hooks.d/before-starting:ro
@@ -195,10 +201,8 @@ services:
       # 域名模式 snippets 使用：邮箱为空时整条 email 指令省略（"email " 不带参数会让 Caddy 拒绝启动）
       HV_ACME_EMAIL_DIRECTIVE: ${HV_ACME_EMAIL:+email ${HV_ACME_EMAIL}}
       TZ: ${HV_TZ:-Asia/Shanghai}
-    # DNS 服务商凭据（仅域名模式）：ALIYUN_* / TENCENTCLOUD_* / CF_API_TOKEN
-    env_file:
-      - path: ./secrets/caddy-dns.env
-        required: false
+    # DNS 服务商凭据（仅域名模式）不放在环境变量里（容器详情会显示环境变量）：
+    # compose.acme.yaml 把 secrets/caddy-dns/ 只读挂载到 /run/secrets/caddy-dns，snippets 用 {file.…} 读取
     volumes:
       - ./caddy:/etc/caddy:ro
       - ${HV_VOL_CADDY_DATA:-caddy_data}:/data
@@ -211,7 +215,9 @@ services:
       app:
         condition: service_started
     networks:
-      - frontend
+      frontend:
+        # 固定地址：Nextcloud 与管理面板只信任来自这个地址的 X-Forwarded-For
+        ipv4_address: ${HV_CADDY_IP:-172.31.250.2}
     healthcheck:
       # 顺带把根证书复制到 ca_public 卷：Caddy 的 pki 目录是 0700/0600（root），面板（uid 65532）读不到，
       # 而且面板绝不能挂载含 root.key 的 /data。域名模式（acme）不需要安装根证书，删除副本。
@@ -262,8 +268,8 @@ services:
       STATE_DIR: /state
       STAT_DIR: /stat
       CA_CERT_FILE: /ca/root.crt
-      # 只信任 Caddy 所在网段传来的 X-Forwarded-For
-      PANEL_TRUSTED_PROXIES: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+      # 只信任 Caddy（固定地址）传来的 X-Forwarded-For
+      PANEL_TRUSTED_PROXIES: ${HV_CADDY_IP:-172.31.250.2}/32
       HV_LOG_RETENTION_DAYS: ${HV_LOG_RETENTION_DAYS:-7}
       # HomeVault 版本（由 hv / hv.ps1 在调用 compose 时通过进程环境传入；可为空）
       HV_VERSION: ${HV_VERSION:-}
@@ -278,8 +284,10 @@ services:
       socket-proxy:
         condition: service_started
     networks:
-      - frontend
-      - dockerapi
+      frontend:
+        # 固定地址：Nextcloud 信任面板转发的 X-Forwarded-For（真实客户端 IP 进入防暴力破解与审计日志）
+        ipv4_address: ${HV_PANEL_IP:-172.31.250.3}
+      dockerapi: {}
     healthcheck:
       test: ["CMD", "/panel", "healthcheck"]
       interval: 30s
@@ -453,7 +461,13 @@ services:
     volumes:
       - restic_cache:/cache
       - ${HV_VOL_HTML:-nc_html}:/src/nextcloud-html:ro
-      - ${HV_NC_DATA_PATH:?HV_NC_DATA_PATH 未设置（Nextcloud 数据目录），请先运行 hv install}:/src/nextcloud-data:ro
+      # 数据盘未挂载时不自动创建（否则会备份一个空目录）
+      - type: bind
+        source: ${HV_NC_DATA_PATH:?HV_NC_DATA_PATH 未设置（Nextcloud 数据目录），请先运行 hv install}
+        target: /src/nextcloud-data
+        read_only: true
+        bind:
+          create_host_path: false
       - ${HV_VOL_CADDY_DATA:-caddy_data}:/src/caddy-data:ro
       - ${HV_VOL_WGEASY:-wg_easy}:/src/wg-easy:ro
       - ${HV_DUMP_DIR:-hv_dumps}:/src/dumps:ro
@@ -472,6 +486,9 @@ networks:
     ipam:
       config:
         - subnet: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+          # 自动分配的地址只取网段的后一半，前一半留给固定地址（Caddy = 网段第 2 个地址，面板 = 第 3 个），
+          # 这样容器重建时自动分配的地址永远不会抢占 Caddy / 面板的固定地址
+          ip_range: ${HV_FRONTEND_IP_RANGE:-172.31.250.128/25}
   backend:
     driver: bridge
     internal: true

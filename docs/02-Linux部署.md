@@ -295,7 +295,7 @@ sudo ./hv install --mirror daocloud
 |---|---|---|
 | 本机局域网 IP（自动检测，请确认；网段自动推算） | `HV_LAN_IP`、`HV_LAN_CIDR` | 确认是 §1.3 里固定的那个 IP，例如 `192.168.1.10` 和 `192.168.1.0/24` |
 | 访问方式：输入域名 = 域名模式，留空 = IP 模式 | `HV_HOST`、`HV_TLS_MODE`（`acme-dns` / `internal`） | 有域名选域名模式（手机不用装证书）；没有就留空，`HV_HOST` 等于局域网 IP |
-| 域名模式：DNS 服务商、证书通知邮箱、API 密钥 | `HV_DNS_PROVIDER`、`HV_ACME_EMAIL`，密钥写入 `secrets/caddy-dns.env` | 服务商可选 `alidns` / `tencentcloud` / `cloudflare`。⚠️ 用只有 DNS 权限的子账号密钥。域名的 A 记录要指向**局域网 IP** |
+| 域名模式：DNS 服务商、证书通知邮箱、API 密钥 | `HV_DNS_PROVIDER`、`HV_ACME_EMAIL`，密钥写入 `secrets/` | 服务商可选 `alidns` / `tencentcloud` / `cloudflare`。⚠️ 用只有 DNS 权限的子账号密钥。域名的 A 记录要指向**局域网 IP** |
 | 硬盘表 + **HomeVault 数据目录**（数据库、配置、日志等） | `HV_DATA_DIR` | 默认 `/srv/homevault`，放在系统盘 SSD 上即可 |
 | **Nextcloud 文件目录**（照片、视频） | `HV_NC_DATA_PATH` | 放在大容量数据盘上，例如 `/mnt/data1/nextcloud-data`，见 [§7](#7-硬盘角色主数据--额外存储--备份目标) |
 | 日志保留天数（1–365，只在第一次安装时问） | `HV_LOG_RETENTION_DAYS`（日志目录 `HV_LOG_DIR` 默认 `<数据目录>/logs`） | 默认 7 天；以后可用 `logs retention <天数>` 或管理面板修改，见 [docs/08-日常运维与升级.md](08-日常运维与升级.md) §7 |
@@ -406,6 +406,13 @@ sudo ./hv install --non-interactive \
 | `sudo ./hv storage remove <名称>` | 删除一个额外存储（只从 Nextcloud 里取消挂载，**不会删除**硬盘上的文件） |
 | `sudo ./hv storage apply` | 按 `storage.conf` 重新生成配置、重建容器并同步 Nextcloud 里的挂载 |
 
+`storage add` 也可以一次给全参数：`sudo ./hv storage add --name 影视资料 --path /mnt/data2/影视资料 --mode ro --backup no --users "@family" --apply`。
+
+- **不能**作为额外存储的目录（`add`、`apply` 会直接拒绝），因为挂进 Nextcloud 后，能看到这个存储的用户就能读到（`rw` 时还能改）里面的文件：
+  - 系统目录：`/`、`/etc`、`/root`、`/boot`、`/usr`、`/bin`、`/sbin`、`/lib`、`/lib64`、`/proc`、`/sys`、`/dev`、`/run`、`/var/run`、`/var/lib/docker`，以及它们下面的任何目录；
+  - 和 HomeVault 自己的目录重叠（相同、在其内部或包含它）的路径：程序目录（含 `secrets/` 密钥）、Nextcloud 主数据目录、Nextcloud 程序目录、数据库、Redis、Caddy 数据（含本地 CA 私钥）和配置、wg-easy（含 VPN 密钥）、数据库导出目录、日志目录、本地备份仓库；
+  - `HV_DATA_DIR`（默认 `/srv/homevault`）本身及它的上级目录（例如 `/srv`）。反过来，`HV_DATA_DIR` 下面的其他子目录是允许的。
+- `apply` 改动挂载时会**重建容器**，包括管理面板：面板的登录会话只保存在内存里，所以已登录面板（和安卓管理 App）的人需要**重新登录**。
 - 读写（`rw`）存储需要让容器里的 www-data（uid 33）有写权限。`apply` 会**先询问你**，再用 `setfacl` 给这个目录加上 uid 33 的读写权限，不会改动原有的属主。
 - 在 Nextcloud 之外（例如直接在主机上）往额外存储里拷了文件，Nextcloud 访问这个目录时会自动发现变化。想立刻全部显示，可以运行 `sudo ./hv occ files:scan --all`。
 - "是否备份"设为 `yes` 的存储，会被一起放进 restic 备份。
@@ -428,7 +435,7 @@ sudo ./hv firewall --show     # 查看
 
 为什么只配 ufw 不够（Docker 发布的端口会绕过 ufw），详见 [docs/01-架构与安全.md](01-架构与安全.md) §3.4。
 
-⚠️ 应用后，只有局域网内的设备能 SSH 到这台主机。外出时要远程管理，请先连上 VPN，并且 VPN 访问范围需要是 `full`；或者回家再处理。
+⚠️ 应用后，只有局域网内的设备能 SSH 到这台主机。VPN 客户端的流量经 wg-easy 地址转换后来自 Docker 内部网段，同样会被拒绝（原因见 [docs/01-架构与安全.md](01-架构与安全.md) §3.4），外出时要远程管理，请回家再处理。
 
 ---
 
@@ -535,7 +542,7 @@ sudo ./hv doctor
 | 强制二步验证、`token_auth_enforced`、公开链接设置 | `sudo ./hv harden` |
 | `occ status`、`occ setupchecks` 摘要 | 按提示处理；也可以在网页的 **管理设置 → 概览** 查看 |
 | 每块用到的硬盘剩余空间（低于 10% 警告） | 清理文件、调整配额或加硬盘，见 [docs/08-日常运维与升级.md](08-日常运维与升级.md) |
-| 上次备份时间（超过 48 小时警告） | `sudo ./hv backup` 手动跑一次，查看 `journalctl -u homevault-backup.service` |
+| 上次成功备份的时间（超过 48 小时 ✘；还没有成功的备份时 !） | `sudo ./hv backup` 手动跑一次，查看 `journalctl -u homevault-backup.service` |
 | TLS 证书有效期 | `sudo ./hv logs caddy` 查看续期错误 |
 | `secrets/` 和 `.env` 的权限 | 按提示修正 |
 | 局域网 IP 没有变化 | 见 [docs/08-日常运维与升级.md](08-日常运维与升级.md)"更换局域网 IP" |
@@ -552,7 +559,7 @@ sudo ./hv doctor
 
 - **DDNS**：`sudo ./hv ddns setup`、`sudo ./hv ddns status`，见 [docs/04-VPN与DDNS.md](04-VPN与DDNS.md)。
 - **硬盘健康监控（Scrutiny）**：见 [docs/08-日常运维与升级.md](08-日常运维与升级.md)"硬盘健康"。
-- **安卓管理 App**：先运行 `sudo ./hv android fetch` 把安装包下载到服务器，再在管理面板"设置"页扫码安装，见 [docs/10-安卓管理App与管理面板.md](10-安卓管理App与管理面板.md) §4。
+- **安卓管理 App**：先运行 `sudo ./hv android fetch` 把安装包下载到服务器（从 `.env` 里 `HV_ANDROID_RELEASE_REPO` 指定的 GitHub 仓库的最新 Release 下载），再在管理面板"设置"页扫码安装，见 [docs/10-安卓管理App与管理面板.md](10-安卓管理App与管理面板.md) §4。
 
 ## 15. 常用命令速查
 
@@ -567,6 +574,9 @@ sudo ./hv doctor
 | `sudo ./hv harden` | 重新应用安全加固并显示关键设置 |
 | `sudo ./hv update` | 备份后更新镜像（同一大版本内） |
 | `sudo ./hv doctor` | 体检 |
+| `sudo ./hv maintenance` | 每日维护：导出容器日志、轮转并清理过期日志、写状态文件（平时由 `homevault-maintenance.timer` 每天 00:10 自动运行） |
+| `sudo ./hv status-update` | 立即刷新管理面板读取的 `state/status.json` 和 `state/vpn-status.json`（平时由 `homevault-status.timer` 每 5 分钟运行） |
+| `sudo ./hv requests process` | 立即执行管理面板提交的请求（只认立即备份、清理日志、修改保留天数三种；平时由 `homevault-requests.path` 自动触发） |
 
 ⚠️ 请用 `./hv up/down`，**不要**直接用 `docker compose up`：HomeVault 每次都要带上正确的配置文件组合（`compose.yaml`、`compose.acme.yaml`、`compose.storage.yaml`）和 profile，并在启动前重新计算派生设置。
 

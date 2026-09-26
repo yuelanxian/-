@@ -93,9 +93,14 @@ if ($cliUrl !== '') {
 	$desired['overwrite.cli.url'] = $cliUrl;
 }
 
-$subnet = envs('HV_FRONTEND_SUBNET');
-if ($subnet !== '') {
-	$desired['trusted_proxies'] = [$subnet];
+// Same list as the image's TRUSTED_PROXIES (Caddy + panel /32, space-separated), so config.php agrees
+// with reverse-proxy.config.php. Older compose files only had the whole frontend subnet.
+$proxies = preg_split('/[\s,]+/', envs('TRUSTED_PROXIES'), -1, PREG_SPLIT_NO_EMPTY);
+if (!$proxies) {
+	$proxies = preg_split('/[\s,]+/', envs('HV_FRONTEND_SUBNET'), -1, PREG_SPLIT_NO_EMPTY);
+}
+if ($proxies) {
+	$desired['trusted_proxies'] = array_values(array_unique($proxies));
 }
 
 $tz = envs('HV_TZ', 'Asia/Shanghai');

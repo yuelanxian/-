@@ -82,7 +82,7 @@ services:
       STATE_DIR: /state
       STAT_DIR: /stat
       CA_CERT_FILE: /ca/root.crt
-      PANEL_TRUSTED_PROXIES: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+      PANEL_TRUSTED_PROXIES: ${HV_CADDY_IP:-172.31.250.2}/32   # 只信任 Caddy 的固定地址
       HV_LOG_RETENTION_DAYS: ${HV_LOG_RETENTION_DAYS:-7}
       HV_VERSION: ${HV_VERSION:-}                      # 由 hv / hv.ps1 通过进程环境传入；可为空
       TZ: ${HV_TZ:-Asia/Shanghai}
@@ -91,7 +91,10 @@ services:
       - ${HV_LOG_DIR}/panel:/logs/panel     # 唯一可写的日志目录：审计日志 panel.log
       - ./state:/state                       # 读状态文件；只写 state/requests/
       - ca_public:/ca:ro                     # 只含本地 CA 根证书 root.crt（见下方 caddy 片段）
-    networks: [frontend, dockerapi]
+    networks:
+      frontend:
+        ipv4_address: ${HV_PANEL_IP:-172.31.250.3}   # 固定地址：Nextcloud 的 TRUSTED_PROXIES 包含它
+      dockerapi: {}
     healthcheck:
       test: ["CMD", "/panel", "healthcheck"]
       interval: 30s
@@ -130,8 +133,9 @@ networks:
 
 要点：
 - `panel` 必须在 `frontend` 网络（Caddy 反代到 `panel:8080`，面板访问 `http://app:80`）和 `dockerapi` 网络。
-  `frontend` 子网 = `HV_FRONTEND_SUBNET`，已在 Nextcloud 的 `TRUSTED_PROXIES` 中 → Nextcloud 接受面板转发的
-  `X-Forwarded-For`（真实客户端 IP 进入 Nextcloud 的防暴力破解和审计日志）。
+  面板在 `frontend` 上有固定地址 `HV_PANEL_IP`（网段第 3 个地址，Caddy 是第 2 个 `HV_CADDY_IP`），Nextcloud 的
+  `TRUSTED_PROXIES` 只包含这两个 /32 → Nextcloud 接受面板转发的 `X-Forwarded-For`（真实客户端 IP 进入 Nextcloud 的
+  防暴力破解和审计日志），而同一网络上的其他容器（wg-easy、ddns-go、备份等）无法伪造。
 - 不要发布（`ports:`）panel 或 socket-proxy 的任何端口。
 - 面板**不**挂载 caddy 数据卷（那里有 CA 私钥）；根证书经 `ca_public` 卷提供（§4.5、§9）。
 - 面板不属于任何 profile；Windows 与 Linux 都启用。
@@ -171,7 +175,7 @@ https://{$HV_HOST}:{$HV_PANEL_PORT} {
 ```
 - caddy 服务需要发布 `${HV_BIND_IP}:${HV_PANEL_PORT}:${HV_PANEL_PORT}`（TCP），并获得环境变量 `HV_PANEL_PORT`（默认 9443）。
 - 不要在 Caddy 设置 `trusted_proxies`：Caddy 会把 `X-Forwarded-For` 设为真实来源 IP，面板只信任来自
-  `PANEL_TRUSTED_PROXIES`（frontend 子网）的该请求头。
+  `PANEL_TRUSTED_PROXIES`（Caddy 的固定地址 `HV_CADDY_IP/32`）的该请求头。
 - 面板自身发送严格的安全头（CSP `default-src 'none'; script-src 'self'…`、`X-Frame-Options: DENY`、`nosniff`、
   `Referrer-Policy: no-referrer`、COOP/CORP）；HSTS 由 Caddy 添加。
 - Windows 的 VPN 兜底地址（`https://<VPN 服务器 IP>`）如也要打开面板，需要在该站点列表中同样加上 `:HV_PANEL_PORT`。
@@ -316,7 +320,7 @@ state/requests/20260926T101500123Z-log-retention.json      (0640，临时文件 
 | `APK_FILE` | `/state/app/homevault.apk` | `/download/android` 的来源 |
 | `SESSION_TTL` | `12h` | 会话有效期（1m–168h） |
 | `ADMIN_RECHECK` | `5m` | 重新核对应用密码有效且仍是管理员的间隔 |
-| `PANEL_TRUSTED_PROXIES` | `HV_FRONTEND_SUBNET`，再缺省 `172.31.250.0/24` | 信任其 `X-Forwarded-For` 的代理网段（逗号/空格分隔） |
+| `PANEL_TRUSTED_PROXIES` | `HV_FRONTEND_SUBNET`，再缺省 `172.31.250.0/24` | 信任其 `X-Forwarded-For` 的代理地址/网段（逗号/空格分隔；compose 设为 `HV_CADDY_IP/32`） |
 | `HV_LOG_RETENTION_DAYS` | `7` | 日志保留天数的缺省值（1–365；status.json 有值时以其为准；无效值只记录警告并按 7 处理，不会让面板无法启动） |
 | `HV_VERSION` | 空 | HomeVault 版本（status.json 有 `version` 时以其为准） |
 | `PANEL_RESTART_ALLOW` | 全部 | 只能**缩小**重启白名单（`app,cron,redis,db,caddy,wg-easy,ddns-go`） |

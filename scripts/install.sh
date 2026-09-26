@@ -99,17 +99,85 @@ install_dir() {
 	return 0
 }
 
-install_write_provider_env() {
-	local provider=$1 id=$2 secret=$3 f=$HV_ROOT/secrets/caddy-dns.env
-	(
-		umask 077
-		case $provider in
-		alidns) printf 'ALIYUN_ACCESS_KEY_ID=%s\nALIYUN_ACCESS_KEY_SECRET=%s\n' "$(env_quote "$id")" "$(env_quote "$secret")" ;;
-		tencentcloud) printf 'TENCENTCLOUD_SECRET_ID=%s\nTENCENTCLOUD_SECRET_KEY=%s\n' "$(env_quote "$id")" "$(env_quote "$secret")" ;;
-		cloudflare) printf 'CF_API_TOKEN=%s\n' "$(env_quote "$secret")" ;;
-		esac
-	) >"$f"
-	chmod 0600 "$f"
+# ---------------------------------------------------------------------------
+# DNS provider credentials (domain mode): one file per value in secrets/caddy-dns/<NAME>, mounted read-only
+# into Caddy by compose.acme.yaml and read with {file.*} placeholders — never environment variables
+# (the panel can inspect containers through the socket proxy, and inspect shows the environment).
+# Files 0644 like the other secrets: the 0700 secrets/ directory protects them on the host.
+# ---------------------------------------------------------------------------
+HV_CADDY_DNS_KEYS=(ALIYUN_ACCESS_KEY_ID ALIYUN_ACCESS_KEY_SECRET TENCENTCLOUD_SECRET_ID TENCENTCLOUD_SECRET_KEY CF_API_TOKEN)
+
+caddy_dns_dir() { printf '%s\n' "$HV_ROOT/secrets/caddy-dns"; }
+
+# caddy_dns_keys PROVIDER → credential names (one per line)
+caddy_dns_keys() {
+	case $1 in
+	alidns) printf '%s\n' ALIYUN_ACCESS_KEY_ID ALIYUN_ACCESS_KEY_SECRET ;;
+	tencentcloud) printf '%s\n' TENCENTCLOUD_SECRET_ID TENCENTCLOUD_SECRET_KEY ;;
+	cloudflare) printf '%s\n' CF_API_TOKEN ;;
+	esac
+}
+
+# caddy_dns_write NAME VALUE — atomic, single line
+caddy_dns_write() {
+	local d f
+	d=$(caddy_dns_dir)
+	install -d -m 0700 "$HV_ROOT/secrets"
+	install -d -m 0755 "$d"
+	f=$d/$1
+	(umask 022 && printf '%s\n' "$2" >"$f.tmp") || return 1
+	chmod 0644 "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+
+# caddy_dns_have_creds PROVIDER — every credential file present and non-empty
+caddy_dns_have_creds() {
+	local k d any=0
+	d=$(caddy_dns_dir)
+	while IFS= read -r k; do
+		[[ -n $k ]] || continue
+		any=1
+		[[ -s $d/$k ]] || return 1
+	done < <(caddy_dns_keys "$1")
+	((any))
+}
+
+install_write_provider_env() { # provider id secret
+	case $1 in
+	alidns) caddy_dns_write ALIYUN_ACCESS_KEY_ID "$2" && caddy_dns_write ALIYUN_ACCESS_KEY_SECRET "$3" ;;
+	tencentcloud) caddy_dns_write TENCENTCLOUD_SECRET_ID "$2" && caddy_dns_write TENCENTCLOUD_SECRET_KEY "$3" ;;
+	cloudflare) caddy_dns_write CF_API_TOKEN "$3" ;;
+	*) return 1 ;;
+	esac
+}
+
+# Older installations kept the credentials in secrets/caddy-dns.env (compose env_file → container environment):
+# move them into secrets/caddy-dns/<NAME> (existing files win) and delete the old file. Idempotent.
+caddy_dns_migrate() {
+	local old=$HV_ROOT/secrets/caddy-dns.env k v n=0
+	[[ -f $old ]] || return 0
+	for k in "${HV_CADDY_DNS_KEYS[@]}"; do
+		v=$(env_get_file "$k" "$old") || continue
+		v=$(trim "$v")
+		[[ -n $v ]] || continue
+		if [[ ! -s $(caddy_dns_dir)/$k ]]; then
+			caddy_dns_write "$k" "$v" || die "无法写入 secrets/caddy-dns/$k"
+		fi
+		n=$((n + 1))
+	done
+	rm -f "$old"
+	info "DNS API 凭据已从 secrets/caddy-dns.env 迁移到 secrets/caddy-dns/（$n 项；不再以环境变量传给 Caddy）"
+}
+
+# Domain mode: compose.acme.yaml mounts secrets/caddy-dns (never auto-created) — make sure it exists and
+# warn when the provider's credentials are missing (Caddy then cannot obtain certificates).
+caddy_dns_check() {
+	[[ ${HV_TLS_MODE:-internal} == acme-dns ]] || return 0
+	install -d -m 0700 "$HV_ROOT/secrets"
+	install -d -m 0755 "$(caddy_dns_dir)"
+	caddy_dns_have_creds "${HV_DNS_PROVIDER:-}" && return 0
+	warn "域名模式缺少 DNS API 凭据文件：$(caddy_dns_keys "${HV_DNS_PROVIDER:-}" | sed 's#^#secrets/caddy-dns/#' | paste -sd ' ' -)"
+	warn "  Caddy 将无法申请证书。请重新运行 sudo $HV_SELF install 输入凭据，或把每一项写入同名文件（只写该值）后运行 sudo $HV_SELF up"
+	return 1
 }
 
 install_summary() {
@@ -151,7 +219,7 @@ cmd_install() {
 	local o_backup_target='' o_backup_path='' o_s3_repo='' o_s3_opts='' o_s3_id='' o_s3_secret_file=''
 	local o_admin_user='' o_project=${COMPOSE_PROJECT_NAME:-} o_wg_host='' o_wg_port='' o_vpn=1 o_vpn_access='' o_extra_hosts=''
 	local o_log_days='' o_firewall=1 o_ufw=0 o_systemd=1 o_timeout=1800 o_retention_set=0 o_subnet='' o_start=1
-	local first=1 lan det_ip det_cidr domain v secret changed_vpn=0 rc=0 prev_backup=''
+	local first=1 lan det_ip det_cidr domain v secret changed_vpn=0 rc=0 prev_backup='' prev_ncdata=''
 	while (($#)); do
 		case $1 in
 		--non-interactive) HV_NONINTERACTIVE=1 ;;
@@ -285,7 +353,8 @@ cmd_install() {
 		env_set HV_DNS_PROVIDER "${o_provider:-$(ask_choice "DNS 服务商" "${HV_DNS_PROVIDER:-alidns}" alidns tencentcloud cloudflare)}"
 		env_set HV_ACME_EMAIL "$(trim "${o_email:-$(ask "证书通知邮箱（可留空）" "${HV_ACME_EMAIL:-}")}")"
 		[[ -z $HV_ACME_EMAIL ]] || valid_email "$HV_ACME_EMAIL" || die "邮箱格式不正确：$HV_ACME_EMAIL（可以留空）"
-		if [[ ! -s $HV_ROOT/secrets/caddy-dns.env || -n $o_dns_secret_file ]]; then
+		caddy_dns_migrate
+		if ! caddy_dns_have_creds "$HV_DNS_PROVIDER" || [[ -n $o_dns_secret_file ]]; then
 			install -d -m 0700 "$HV_ROOT/secrets"
 			if [[ -n $o_dns_secret_file ]]; then
 				secret=$(tr -d '\r\n' <"$o_dns_secret_file")
@@ -294,7 +363,8 @@ cmd_install() {
 			fi
 			[[ $HV_DNS_PROVIDER == cloudflare || -n $o_dns_id ]] || o_dns_id=$(ask "DNS API ID（AccessKey ID / SecretId）" "")
 			[[ -n $secret ]] || die "域名模式需要 DNS API 凭据（--dns-id / --dns-secret-file）"
-			install_write_provider_env "$HV_DNS_PROVIDER" "$o_dns_id" "$secret"
+			[[ $HV_DNS_PROVIDER == cloudflare || -n $o_dns_id ]] || die "域名模式需要 DNS API ID（--dns-id）"
+			install_write_provider_env "$HV_DNS_PROVIDER" "$o_dns_id" "$secret" || die "无法写入 DNS API 凭据（secrets/caddy-dns/）"
 		fi
 		warn "请在 DNS 中把 $HV_HOST 的 A 记录设为局域网 IP $HV_LAN_IP（外网通过 VPN 访问同一地址）。"
 	fi
@@ -309,6 +379,7 @@ cmd_install() {
 	[[ $v == /* ]] || die "数据目录必须是绝对路径：$v"
 	env_set HV_DATA_DIR "$(realpath -m -- "$v")"
 	[[ $HV_DATA_DIR != / ]] || die "数据目录不能是 /"
+	prev_ncdata=${HV_NC_DATA_PATH:-}
 	v=${o_ncdata:-$(ask "Nextcloud 文件目录（照片、视频等，占用最大）" "${HV_NC_DATA_PATH:-$HV_DATA_DIR/nextcloud-data}")}
 	[[ $v == /* ]] || die "路径必须是绝对路径：$v"
 	env_set HV_NC_DATA_PATH "$(realpath -m -- "$v")"
@@ -435,6 +506,11 @@ cmd_install() {
 	done
 	install -d -m 0755 "$HV_DATA_DIR"
 	install_dir "$HV_VOL_HTML" 0750 33:33
+	# compose never creates the data directory (create_host_path: false); install does, but on a re-run with
+	# the same path a missing/empty directory means an unmounted data disk: never create it on the system disk.
+	if ((first == 0)) && [[ $HV_NC_DATA_PATH == "$prev_ncdata" ]]; then
+		hv_check_nc_data || die "Nextcloud 文件目录不可用（数据盘未挂载？），安装已中止"
+	fi
 	install_dir "$HV_NC_DATA_PATH" 0750 33:33
 	# PostgreSQL 18 mounts /var/lib/postgresql itself: the image's postgres user must be able to traverse it.
 	# The entrypoint chowns only PGDATA (18/docker, kept 0700); a 0700 root-owned mount makes initdb fail.
@@ -476,6 +552,7 @@ cmd_install() {
 
 	# ---- render & start -----------------------------------------------------
 	hv_write_derived
+	caddy_dns_check || true
 	storage_render_if_needed
 	vpn_prepare_init
 	if ((o_start == 0)); then
@@ -489,6 +566,7 @@ cmd_install() {
 	fi
 	panel_build_if_needed || die "无法构建管理面板镜像"
 	title "启动服务"
+	hv_migrate_frontend_network
 	dc up -d || die "启动失败（查看：$HV_SELF logs）"
 	wait_app_ready "$o_timeout" || die "Nextcloud 未能就绪"
 

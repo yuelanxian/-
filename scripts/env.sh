@@ -127,6 +127,7 @@ env_defaults() {
 	: "${HV_HTTP_PORT:=80}" "${HV_HTTPS_PORT:=443}" "${HV_ADMIN_PORT:=8443}" "${HV_PANEL_PORT:=9443}"
 	: "${HV_ALLOWED_CIDRS:=private_ranges 100.64.0.0/10}"
 	: "${HV_FRONTEND_SUBNET:=172.31.250.0/24}"
+	: "${HV_CADDY_IP:=}" "${HV_PANEL_IP:=}" "${HV_FRONTEND_IP_RANGE:=}"
 	: "${HV_TZ:=Asia/Shanghai}"
 	: "${HV_TLS_MODE:=internal}" "${HV_DNS_PROVIDER:=alidns}"
 	: "${HV_ADMIN_USER:=hvadmin}"
@@ -167,8 +168,24 @@ hv_canonical_hosts() {
 	return 0
 }
 
+# Fixed frontend addresses (only Caddy and the panel are trusted proxies): Caddy = network + 2,
+# panel = network + 3; dynamic addresses come from the upper half of the subnet (ip_range), so a
+# recreated container can never take a fixed address. Leaves the values unchanged for an invalid subnet.
+hv_compute_frontend() {
+	local net len base
+	is_ipv4_cidr "${HV_FRONTEND_SUBNET:-}" || return 0
+	net=$(cidr_network "$HV_FRONTEND_SUBNET")
+	len=${net#*/}
+	((len >= 1 && len <= 29)) || return 0
+	base=$(ip_to_int "${net%/*}")
+	HV_CADDY_IP=$(int_to_ip $((base + 2)))
+	HV_PANEL_IP=$(int_to_ip $((base + 3)))
+	HV_FRONTEND_IP_RANGE="$(int_to_ip $((base + (1 << (31 - len)))))/$((len + 1))"
+}
+
 hv_compute_derived() {
 	local h port=$HV_HTTPS_PORT sites='' trusted=''
+	hv_compute_frontend
 	while IFS= read -r h; do
 		[[ -n $h ]] || continue
 		sites+="${sites:+, }https://$h:$port"
@@ -213,7 +230,8 @@ hv_ensure_env_keys() {
 hv_write_derived() {
 	hv_compute_derived
 	local k
-	for k in HV_SITE_ADDRESSES HV_TRUSTED_DOMAINS HV_OVERWRITE_CLI_URL HV_TLS_SNIPPET HV_ADMIN_SNIPPET; do
+	for k in HV_SITE_ADDRESSES HV_TRUSTED_DOMAINS HV_OVERWRITE_CLI_URL HV_TLS_SNIPPET HV_ADMIN_SNIPPET \
+		HV_CADDY_IP HV_PANEL_IP HV_FRONTEND_IP_RANGE; do
 		if [[ $(env_get "$k" || true) != "${!k}" ]]; then
 			env_set "$k" "${!k}"
 		fi
@@ -256,6 +274,16 @@ hv_validate_env() {
 			rc=1
 		}
 	done
+	if ! is_ipv4_cidr "${HV_FRONTEND_SUBNET:-}"; then
+		err "HV_FRONTEND_SUBNET 不是有效的 IPv4 网段：${HV_FRONTEND_SUBNET:-}（例如 172.31.250.0/24）"
+		rc=1
+	elif ((10#${HV_FRONTEND_SUBNET#*/} < 16 || 10#${HV_FRONTEND_SUBNET#*/} > 28)); then
+		err "HV_FRONTEND_SUBNET 的前缀长度必须在 16–28 之间：$HV_FRONTEND_SUBNET（例如 172.31.250.0/24）"
+		rc=1
+	elif [[ $(cidr_network "$HV_FRONTEND_SUBNET") != "$HV_FRONTEND_SUBNET" ]]; then
+		err "HV_FRONTEND_SUBNET 必须写网段地址：$HV_FRONTEND_SUBNET（应为 $(cidr_network "$HV_FRONTEND_SUBNET")）"
+		rc=1
+	fi
 	if [[ -n ${HV_BIND_IP:-} ]] && ! is_ipv4 "$HV_BIND_IP"; then
 		err "HV_BIND_IP 必须是 IPv4 地址：$HV_BIND_IP（不要留空或写 IPv6，否则可能暴露到公网 IPv6）"
 		rc=1

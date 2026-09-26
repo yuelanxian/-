@@ -158,15 +158,51 @@ panel_build_if_needed() {
 	return 1
 }
 
+# The Nextcloud data bind mount is never created automatically (compose: create_host_path: false):
+# a missing directory almost always means the data disk is not mounted.
+hv_check_nc_data() {
+	local p=${HV_NC_DATA_PATH:-}
+	[[ $p == /* ]] || return 0
+	if [[ ! -d $p ]]; then
+		err "Nextcloud 文件目录不存在：$p"
+		msg "  数据盘可能没有挂载（检查：lsblk、findmnt、/etc/fstab；挂载：sudo mount -a）。"
+		msg "  为了不把照片和文件悄悄写到系统盘，HomeVault 不会自动创建这个目录。挂载后重新运行：sudo $HV_SELF up"
+		return 1
+	fi
+	if [[ -f $HV_STATE_DIR/installed && -z $(find "$p" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
+		err "Nextcloud 文件目录是空的：$p（已安装的 Nextcloud 至少有 .ncdata 等文件）"
+		msg "  数据盘可能没有挂载到这个目录（检查：findmnt $p、/etc/fstab；挂载：sudo mount -a），挂载后重新运行：sudo $HV_SELF up"
+		return 1
+	fi
+	return 0
+}
+
+# A frontend network created by an older compose.yaml (without ip_range) or for another subnet is reused
+# as it is by older Compose versions, so a dynamically addressed container could hold Caddy's / the panel's
+# fixed address. Remove the stack's containers and networks once (data is kept); `up` recreates them.
+hv_migrate_frontend_network() {
+	local cfg
+	[[ -n ${HV_FRONTEND_IP_RANGE:-} ]] || return 0
+	cfg=$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{.IPRange}};{{end}}' \
+		"${COMPOSE_PROJECT_NAME}_frontend" 2>/dev/null) || return 0
+	[[ $cfg == "$HV_FRONTEND_SUBNET $HV_FRONTEND_IP_RANGE;" ]] && return 0
+	info "需要重建 Docker 前端网络（Caddy 与管理面板使用固定地址），先停止全部服务（数据不受影响）…"
+	dc down --remove-orphans || die "停止服务失败，无法重建 Docker 网络（可手动运行：$HV_SELF down 后再 $HV_SELF up）"
+}
+
 # Everything `up` needs before docker compose runs (idempotent; directories only as root)
 hv_prepare_up() {
 	hv_ensure_env_keys
 	hv_validate_env || die ".env 配置有误（见上方说明），请修改 $HV_ENV_FILE 后重试"
 	hv_write_derived
+	caddy_dns_migrate
+	caddy_dns_check || true
+	hv_check_nc_data || die "Nextcloud 文件目录不可用，未启动服务"
 	storage_render_if_needed
 	logs_prepare_dirs
 	state_prepare_dirs
 	panel_build_if_needed || die "无法构建管理面板镜像"
+	hv_migrate_frontend_network
 }
 
 # ---------------------------------------------------------------------------
