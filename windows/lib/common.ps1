@@ -720,13 +720,20 @@ function ConvertTo-HvJson {
     return (ConvertTo-HvJsonString ([string]$Value))
 }
 
-function Test-HvReparsePoint {
-    # True for a symbolic link / junction / other reparse point (file or directory); never follows it.
-    param([Parameter(Mandatory = $true)][string]$Path)
+function Test-HvLinkItem {
+    # True for a symbolic link or junction (followable links) - FileSystemInfo or path; never follows it.
+    # Other reparse points are not links: OneDrive "Files On-Demand" marks every file and folder under a synced
+    # Desktop/Documents as a reparse point, and WSL-style symlinks are not followed by Windows at all.
+    param([Parameter(Mandatory = $true)]$Item)
     try {
-        $a = [System.IO.File]::GetAttributes($Path)
-        return (($a -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+        if ($Item -is [System.IO.FileSystemInfo]) { $attr = $Item.Attributes; $p = $Item.FullName }
+        else { $p = [string]$Item; $attr = [System.IO.File]::GetAttributes($p) }
+        if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { return $false }
     } catch { return $false }
+    try {
+        $lt = [string](Get-Item -LiteralPath $p -Force -ErrorAction Stop).LinkType
+        return ($lt -eq 'SymbolicLink' -or $lt -eq 'Junction')
+    } catch { return $true }   # a reparse point we cannot inspect: treat it as a link (the safe side)
 }
 
 function New-HvTempPath {
@@ -749,7 +756,7 @@ function Move-HvFileReplace {
     # Rename Source over Destination (atomic on the same volume where supported). A destination that is a
     # link is removed first (the link itself, never its target), so the host never writes through it.
     param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Destination)
-    if (Test-HvReparsePoint $Destination) {
+    if (Test-HvLinkItem $Destination) {
         if ([System.IO.Directory]::Exists($Destination)) { [System.IO.Directory]::Delete($Destination) } else { [System.IO.File]::Delete($Destination) }
     }
     if ([System.IO.File]::Exists($Destination)) {

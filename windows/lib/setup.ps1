@@ -26,6 +26,15 @@ function Test-HvLogDirPath {
     return (($Path -match '^[A-Za-z]:[\\/]') -or $Path.StartsWith('/'))
 }
 
+function Test-HvDriveRoot {
+    # Pure: a whole drive ("D:", "D:\") or the POSIX root - never usable as a HomeVault folder: install sets a
+    # private ACL on these folders (a drive root would change the permissions of the entire drive) and the log
+    # retention deletes old *.log / *.txt files below the log folder.
+    param([AllowEmptyString()][string]$Path)
+    $t = ([string]$Path).Trim()
+    return ($t -eq '' -or $t -match '^[A-Za-z]:[\\/]?$' -or $t -match '^[\\/]+$')
+}
+
 function Invoke-HvOptionalStep {
     # Run a function provided by another windows\lib module if present (older/partial checkouts skip it).
     param([string]$Function, [string]$What)
@@ -71,6 +80,7 @@ function Select-HvDataLocation {
         $letter = Read-HvValue -Prompt '请选择主数据盘（输入盘符）' -Default $defLetter -Validate { param($v) $null -ne (Find-HvDisk $Disks $v) } -ErrorText '请输入上表中存在的盘符，例如 D'
         $base = $letter.Trim().TrimEnd(':').ToUpperInvariant() + ':\HomeVault'
     }
+    if ($dataDir -and (Test-HvDriveRoot $base)) { Stop-Hv ('数据目录不能是整个盘的根目录（' + $dataDir + '），请指定一个文件夹，例如 D:\HomeVault') 2 }
     $sep = '\'
     if (-not (Test-HvWindows) -and $base.StartsWith('/')) { $sep = '/' }
     $nc = $base + $sep + 'nextcloud-data'
@@ -107,7 +117,8 @@ function Select-HvBackupLocation {
     $res['HV_BACKUP_TARGET'] = $target
     if ($target -eq 'local') {
         if (-not $path -and $drive) { $path = $drive.Trim().TrimEnd('\').TrimEnd(':').ToUpperInvariant() + ':\HomeVault-Backup\restic' }
-        if (-not $path) { $path = Get-HvEnvDictValue $Cur 'HV_BACKUP_LOCAL_PATH' }
+        $fromEnv = $false
+        if (-not $path) { $path = Get-HvEnvDictValue $Cur 'HV_BACKUP_LOCAL_PATH'; $fromEnv = [bool]$path }
         if (-not $path) {
             if (-not (Test-HvWindows)) { Stop-Hv '请用 --backup-path 指定备份目录。' 2 }
             $dataDisk = Find-HvDisk $Disks (Get-HvDriveLetterFromPath $DataBase)
@@ -118,6 +129,11 @@ function Select-HvBackupLocation {
             $letter = Read-HvValue -Prompt '备份放在哪个盘（输入盘符，最好是另一块物理硬盘）' -Default $def -Validate { param($v) $null -ne (Find-HvDisk $Disks $v) } -ErrorText '请输入上表中存在的盘符'
             $path = $letter.Trim().TrimEnd(':').ToUpperInvariant() + ':\HomeVault-Backup\restic'
         }
+        $path = $path.Trim()
+        if (Test-HvDriveRoot $path) {
+            if (-not $fromEnv) { Stop-Hv ('备份目录不能是整个盘的根目录（' + $path + '），请指定一个文件夹，例如 E:\HomeVault-Backup\restic') 2 }
+            Write-HvWarn ('备份目录是整个盘的根目录（' + $path + '）：建议改为一个专用文件夹（--backup-path）。')
+        } else { $path = $path.TrimEnd('\', '/') }
         if (Test-HvWindows) {
             if (-not (Test-HvWindowsAbsPath $path)) { Stop-Hv ('备份路径必须是完整路径：' + $path) 2 }
             $bd = Find-HvDisk $Disks (Get-HvDriveLetterFromPath $path)
@@ -409,11 +425,15 @@ function Invoke-HvCmdInstall {
             $logDir = $defLog
             if (Test-HvInteractive) {
                 Write-HvInfo '日志目录保存管理命令、备份、Nextcloud、访问日志和容器日志，可以在资源管理器中直接打开查看。'
-                $logDir = Read-HvValue -Prompt '日志目录' -Default $defLog -Validate { param($v) Test-HvLogDirPath $v } -ErrorText '请输入完整路径，例如 D:\HomeVault\logs'
+                $logDir = Read-HvValue -Prompt '日志目录' -Default $defLog -Validate { param($v) (Test-HvLogDirPath $v) -and -not (Test-HvDriveRoot $v) } -ErrorText '请输入完整的文件夹路径（不能是整个盘），例如 D:\HomeVault\logs'
             }
         }
     }
     if (-not (Test-HvLogDirPath $logDir) -or ((Test-HvWindows) -and $logDir -notmatch '^[A-Za-z]:[\\/]')) { Stop-Hv ('日志目录必须是完整路径（例如 D:\HomeVault\logs）：' + $logDir) 2 }
+    if (Test-HvDriveRoot $logDir) {
+        if ((Get-HvOpt $p 'log-dir' '') -or $logDir -ne (Get-HvEnvDictValue $cur 'HV_LOG_DIR')) { Stop-Hv ('日志目录不能是整个盘的根目录（' + $logDir + '），请指定一个文件夹，例如 D:\HomeVault\logs') 2 }
+        Write-HvWarn ('日志目录是整个盘的根目录（' + $logDir + '）：建议用 --log-dir 改为专用文件夹，例如 D:\HomeVault\logs。')
+    }
     if ($logDir.Length -gt 3) { $logDir = $logDir.TrimEnd('\', '/') }
     $set['HV_LOG_DIR'] = $logDir
     $days = Get-HvOpt $p 'log-retention' ''
@@ -514,18 +534,19 @@ function Invoke-HvCmdInstall {
     # ---- secrets and directories
     # The kit's scripts run elevated (menu, install) and as scheduled tasks: other local accounts must not be able
     # to change them (a folder created on a secondary drive inherits "Authenticated Users: Modify").
-    if (Test-HvAdmin) {
+    if ((Test-HvAdmin) -and -not (Test-HvDriveRoot $root)) {
         if (-not (Test-HvPrivateAcl $root)) { Write-HvInfo ('收紧 HomeVault 程序目录权限（仅 SYSTEM / 管理员 / 当前用户）：' + $root) }
         Set-HvPrivateAcl -Path $root
     }
     $created = @(Initialize-HvSecrets)
     if ($created.Count -gt 0) { Write-HvOk ('已生成密钥：' + ($created -join ', ')) } else { Write-HvInfo '已有密钥保持不变。' }
     foreach ($d in @($loc.Base, $loc.NcData, (Get-HvEnvValue 'HV_DUMP_DIR'))) { [void](New-HvDirectory $d) }
-    Set-HvPrivateAcl -Path $loc.Base
+    # never on a whole drive (older installs may have used one): that would rewrite the ACL of every file on it
+    if (-not (Test-HvDriveRoot $loc.Base)) { Set-HvPrivateAcl -Path $loc.Base } else { Set-HvPrivateAcl -Path $loc.NcData }
     if ((Get-HvEnvValue 'HV_BACKUP_TARGET') -eq 'local') {
         $bp = Get-HvEnvValue 'HV_BACKUP_LOCAL_PATH'
         [void](New-HvDirectory $bp)
-        Set-HvPrivateAcl -Path $bp
+        if (-not (Test-HvDriveRoot $bp)) { Set-HvPrivateAcl -Path $bp }
     }
     if ($vpnOn -and $wgDir) { [void](New-HvDirectory $wgDir) }
     Initialize-HvRuntimeDirs

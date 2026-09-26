@@ -339,6 +339,11 @@ code=$(http_code -u "$USER_NAME:$APPPW" -T "$WORK/w.txt" "$DAV/$ENC/w.txt")
 [[ $code =~ ^(201|204)$ ]] || bail "写入挂载失败（HTTP $code）"
 [[ $(cat "$EXT/w.txt" 2>/dev/null) == written-via-dav ]] || bail "写入未落到宿主机目录"
 hvc storage apply --yes >>"$LOG" 2>&1 || bail "重复 storage apply 失败"
+# HomeVault's own directories (here: Caddy data with the CA private key) can never become a storage
+if hvc storage add --name 泄密 --path "$WORK/data/caddy-data" --mode ro --backup no --no-apply --yes >>"$LOG" 2>&1; then
+	bail "Caddy 数据目录竟然可以添加为额外存储"
+fi
+grep -q '泄密' "$APP/storage.conf" && bail "被拒绝的存储写入了 storage.conf"
 [[ $(hvc occ files_external:list --output=json | grep -o '"mount_id"' | wc -l) == 1 ]] || bail "重复 apply 产生了重复挂载"
 grep -q "target: \"/stat/storage/$(storage_slug_e2e "$EXT")\"" "$APP/compose.storage.yaml" || bail "compose.storage.yaml 缺少面板的扩展存储挂载"
 wait_panel || bail "面板重建后不可用"

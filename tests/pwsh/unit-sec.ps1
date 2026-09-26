@@ -147,11 +147,17 @@ if (-not $canLink) {
     [void](New-Item -ItemType Directory -Force -Path $st)
     $dst = Join-Path $st 'status.json'
     [void](New-Item -ItemType SymbolicLink -Path $dst -Target $victim)
-    Assert-True 'reparse point detected' (Test-HvReparsePoint $dst)
-    Assert-True 'regular file is not a reparse point' (-not (Test-HvReparsePoint $victim))
+    Assert-True 'symbolic link detected' (Test-HvLinkItem $dst)
+    Assert-True 'regular file is not a link' (-not (Test-HvLinkItem $victim))
+    Assert-True 'FileInfo of a link' (Test-HvLinkItem (New-Object System.IO.FileInfo($dst)))
+    Assert-True 'DirectoryInfo of a plain folder' (-not (Test-HvLinkItem (New-Object System.IO.DirectoryInfo($victimDir))))
+    $dirLink = Join-Path $OutDir 'dirlink'
+    [void](New-Item -ItemType SymbolicLink -Path $dirLink -Target $victimDir)
+    Assert-True 'DirectoryInfo of a folder link' (Test-HvLinkItem (New-Object System.IO.DirectoryInfo($dirLink)))
+    Assert-True 'missing path is not a link' (-not (Test-HvLinkItem (Join-Path $OutDir 'nope')))
     Write-HvJsonFile -Path $dst -Value ([ordered]@{ ok = $true })
     Assert-Eq 'link target untouched' 'keep me' ([System.IO.File]::ReadAllText($victim))
-    Assert-True 'destination replaced by a regular file' ((-not (Test-HvReparsePoint $dst)) -and ([System.IO.File]::ReadAllText($dst) -match '"ok": true'))
+    Assert-True 'destination replaced by a regular file' ((-not (Test-HvLinkItem $dst)) -and ([System.IO.File]::ReadAllText($dst) -match '"ok": true'))
     $t1 = New-HvTempPath $dst; $t2 = New-HvTempPath $dst
     Assert-True 'temp names are unpredictable' ($t1 -ne $t2 -and $t1 -match '[\\/]\.status\.json\.[A-Za-z0-9]{16}\.tmp$')
     # a link already sitting at the temp name makes CreateNew fail instead of writing through it
@@ -175,7 +181,7 @@ if (-not $canLink) {
     [System.IO.File]::WriteAllText((Join-Path $reqDir '20260926T120000000Z-shell.json'), '{"type":"shell"}', (New-Object System.Text.UTF8Encoding($false)))
     [void](Invoke-HvRequestsProcess)
     $doneReal = Join-Path $reqDir 'done'
-    Assert-True 'linked done\ replaced by a real directory' ((-not (Test-HvReparsePoint $doneReal)) -and [System.IO.Directory]::Exists($doneReal))
+    Assert-True 'linked done\ replaced by a real directory' ((-not (Test-HvLinkItem $doneReal)) -and [System.IO.Directory]::Exists($doneReal))
     Assert-True 'result written into the real done\' (Test-Path -LiteralPath (Join-Path $doneReal '20260926T120000000Z-shell.result.json'))
     Assert-Eq 'files behind the link not deleted' 206 @(Get-ChildItem -LiteralPath $other -File).Count
     Assert-True 'old link moved aside' (@(Get-ChildItem -LiteralPath $reqDir -Force | Where-Object { $_.Name -like '.done-invalid-*' }).Count -eq 1)
@@ -206,6 +212,42 @@ try {
 $script:HvRoot = $Root
 $ba = @(Get-HvResticBackupArgs -Env ([ordered]@{ HV_BACKUP_TARGET = 'local' }) -Paths @('/src/project'))
 Assert-True 'lock file excluded from the snapshot' (($ba -join ' ').Contains('--exclude /src/project/state/backup.lock'))
+
+# ------------------------------------------------------------------ whole drives / log retention scope
+Section 'drive roots and log retention scope'
+foreach ($r in @('D:', 'D:\', 'd:/', '/', '', '  ')) { Assert-True ('drive root: [' + $r + ']') (Test-HvDriveRoot $r) }
+foreach ($r in @('D:\HomeVault', 'E:\HomeVault-Backup\restic', '/srv/hv', 'D:\x\')) { Assert-True ('not a drive root: ' + $r) (-not (Test-HvDriveRoot $r)) }
+$thrown = ''
+try { [void](Select-HvDataLocation -Parsed @{ Positional = @(); Opts = @{ datadir = 'D:\' } } -Cur ([ordered]@{}) -Disks @()) } catch { $thrown = Get-HvErrorMessage $_ }
+Assert-True '--data-dir D:\ refused (install would re-ACL the whole drive)' ($thrown -like '*根目录*')
+$thrown = ''
+try { [void](Select-HvBackupLocation -Parsed @{ Positional = @(); Opts = @{ backuptarget = 'local'; backuppath = 'E:\' } } -Cur ([ordered]@{}) -Disks @() -DataBase 'D:\HomeVault') } catch { $thrown = Get-HvErrorMessage $_ }
+Assert-True '--backup-path E:\ refused' ($thrown -like '*根目录*')
+$bk = Select-HvBackupLocation -Parsed @{ Positional = @(); Opts = @{ backuptarget = 'local'; backuppath = '/srv/My Backup/' } } -Cur ([ordered]@{}) -Disks @() -DataBase '/srv/hv'
+Assert-Eq 'backup path trailing separator trimmed' '/srv/My Backup' $bk['HV_BACKUP_LOCAL_PATH']
+$lr = Join-Path $OutDir 'logroot'
+foreach ($d in @('caddy', 'homevault', 'mydocs')) { [void](New-Item -ItemType Directory -Force -Path (Join-Path $lr $d)) }
+foreach ($f in @('caddy/access.log', 'homevault/hv-2020-01-01.log', 'mydocs/notes.txt', 'readme.txt')) { [System.IO.File]::WriteAllText((Join-Path $lr $f), 'x') }
+$managed = @(Get-HvManagedLogFiles $lr | ForEach-Object { (Get-HvRelativeLogPath -Dir $lr -FullName $_.FullName) -replace '\\', '/' } | Sort-Object)
+Assert-Eq 'retention only inside HomeVault log subfolders' 'caddy/access.log,homevault/hv-2020-01-01.log' ($managed -join ',')
+# Invoke-HvLogClean end to end: old rotated logs go, open/active files and the user's own files stay
+$inst2 = Join-Path $OutDir 'cleaninst'
+$lr2 = Join-Path $inst2 'logs'
+foreach ($d in @('caddy', 'nextcloud', 'mydocs')) { [void](New-Item -ItemType Directory -Force -Path (Join-Path $lr2 $d)) }
+[System.IO.File]::WriteAllText((Join-Path $inst2 '.env'), ("HV_LOG_DIR=" + $lr2 + "`nHV_LOG_RETENTION_DAYS=7`n"))
+$old = (Get-Date).AddDays(-30)
+foreach ($f in @('caddy/access.log', 'caddy/access-2020-01-01T00-00-00.000.log', 'nextcloud/nextcloud.log', 'nextcloud/nextcloud-2020-01-01.log', 'mydocs/diary.txt', 'old-notes.txt')) {
+    $fp = Join-Path $lr2 $f
+    [System.IO.File]::WriteAllText($fp, 'x')
+    [System.IO.File]::SetLastWriteTime($fp, $old)
+}
+$script:HvRoot = $inst2; $script:HvEnvCache = $null
+$n = Invoke-HvLogClean
+$script:HvRoot = $Root; $script:HvEnvCache = $null
+Assert-Eq 'log clean count' 2 $n
+Assert-True 'active access.log / nextcloud.log kept (Caddy keeps access.log open)' ((Test-Path -LiteralPath (Join-Path $lr2 'caddy/access.log')) -and (Test-Path -LiteralPath (Join-Path $lr2 'nextcloud/nextcloud.log')))
+Assert-True 'rotated logs deleted' (-not (Test-Path -LiteralPath (Join-Path $lr2 'caddy/access-2020-01-01T00-00-00.000.log')) -and -not (Test-Path -LiteralPath (Join-Path $lr2 'nextcloud/nextcloud-2020-01-01.log')))
+Assert-True 'files outside the HomeVault subfolders kept' ((Test-Path -LiteralPath (Join-Path $lr2 'mydocs/diary.txt')) -and (Test-Path -LiteralPath (Join-Path $lr2 'old-notes.txt')))
 
 # ------------------------------------------------------------------ misc
 Section 'misc'

@@ -230,7 +230,8 @@ try {
         Assert-True ('request file name rejected: ' + $n) (-not (Test-HvRequestFileName $n))
     }
     $res = New-HvRequestResult -RequestFile 'x-backup.json' -Type '' -Ok $false -Message '无效' -Now $now
-    Assert-Eq 'result keys' 'request,type,ok,finished,message' (@($res.Keys) -join ',')
+    Assert-Eq 'result keys (as the Linux runner)' 'id,request,type,ok,finished,message' (@($res.Keys) -join ',')
+    Assert-Eq 'result id' 'x-backup' $res['id']
     Assert-Eq 'result unknown type' 'unknown' $res['type']
     Assert-True 'result time is RFC 3339' ($res['finished'] -match '^2026-09-26T04:00:00[+-]\d\d:\d\d$')
 

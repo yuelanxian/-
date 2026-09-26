@@ -52,11 +52,13 @@ function ConvertFrom-HvRequestText {
 }
 
 function New-HvRequestResult {
-    # Pure: content of done\<id>.result.json.
+    # Pure: content of done\<id>.result.json (same keys as the Linux runner: id, request, type, ok, finished, message).
     param([string]$RequestFile, [AllowEmptyString()][string]$Type, [bool]$Ok, [AllowEmptyString()][string]$Message, [datetime]$Now)
     $t = $Type
     if (-not $t) { $t = 'unknown' }
-    return [ordered]@{ request = $RequestFile; type = $t; ok = $Ok; finished = (Format-HvIsoTime $Now); message = $Message }
+    $id = $RequestFile
+    if ($id -match '(?i)\.json$') { $id = $id.Substring(0, $id.Length - 5) }
+    return [ordered]@{ id = $id; request = $RequestFile; type = $t; ok = $Ok; finished = (Format-HvIsoTime $Now); message = $Message }
 }
 
 # ---------------------------------------------------------------- actions
@@ -129,16 +131,16 @@ function Write-HvRequestResult {
 
 function Get-HvPendingRequestFiles {
     param([string]$Dir)
-    if (-not [System.IO.Directory]::Exists($Dir) -or (Test-HvReparsePoint $Dir)) { return @() }
+    if (-not [System.IO.Directory]::Exists($Dir) -or (Test-HvLinkItem $Dir)) { return @() }
     return @(Get-ChildItem -LiteralPath $Dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.json' -and -not $_.Name.StartsWith('.') } | Sort-Object Name)
 }
 
 function Remove-HvOldRequestResults {
     # Keep the newest request/result files in done\ (only regular *.json files; links are never followed).
     param([string]$DoneDir, [int]$Keep = 200)
-    if (Test-HvReparsePoint $DoneDir) { return }
+    if (Test-HvLinkItem $DoneDir) { return }
     $all = @(Get-ChildItem -LiteralPath $DoneDir -File -Filter '*.json' -ErrorAction SilentlyContinue |
-            Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 } | Sort-Object LastWriteTime -Descending)
+            Where-Object { -not (Test-HvLinkItem $_) } | Sort-Object LastWriteTime -Descending)
     if ($all.Count -le $Keep) { return }
     foreach ($x in $all[$Keep..($all.Count - 1)]) { try { [System.IO.File]::Delete($x.FullName) } catch { } }
 }
@@ -147,9 +149,9 @@ function Get-HvRequestDoneDir {
     # state\requests\done as a real directory. The panel container can write below state\requests: a link or
     # file planted as done\ is moved aside (never followed) and the directory re-created, as on Linux.
     param([string]$RequestsDir)
-    if (Test-HvReparsePoint $RequestsDir) { Stop-Hv ('state\requests 是符号链接/联接点，拒绝处理管理面板请求：' + $RequestsDir) }
+    if (Test-HvLinkItem $RequestsDir) { Stop-Hv ('state\requests 是符号链接/联接点，拒绝处理管理面板请求：' + $RequestsDir) }
     $done = Join-HvPath $RequestsDir 'done'
-    if ((Test-HvReparsePoint $done) -or [System.IO.File]::Exists($done)) {
+    if ((Test-HvLinkItem $done) -or [System.IO.File]::Exists($done)) {
         $aside = Join-HvPath $RequestsDir ('.done-invalid-' + (Get-Date).ToString('yyyyMMddHHmmss', [System.Globalization.CultureInfo]::InvariantCulture) + '-' + (New-HvRandomString 6))
         Write-HvWarn ('state\requests\done 不是普通目录，已移到 ' + [System.IO.Path]::GetFileName($aside) + ' 并重建。')
         if ([System.IO.Directory]::Exists($done)) { [System.IO.Directory]::Move($done, $aside) } else { [System.IO.File]::Move($done, $aside) }
@@ -167,7 +169,7 @@ function Invoke-HvRequestsProcess {
     $backupResult = $null
     foreach ($f in $files) {
         $name = $f.Name
-        if (($f.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or -not (Test-HvRequestFileName $name)) {
+        if ((Test-HvLinkItem $f) -or -not (Test-HvRequestFileName $name)) {
             Write-HvLog ('忽略并删除不合规的请求文件：' + $name)
             try { [System.IO.File]::Delete($f.FullName) } catch { }
             continue

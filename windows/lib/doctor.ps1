@@ -40,6 +40,32 @@ function Get-HvSetupChecksSummary {
     return $res
 }
 
+function Get-HvForeignWriters {
+    # Accounts other than SYSTEM / Administrators / the HomeVault user(s) that may modify Path (write, append,
+    # delete, change permissions). Used for the program folder: its scripts run elevated and as scheduled tasks.
+    param([string]$Path)
+    $out = @()
+    if (-not (Test-HvWindows) -or -not (Test-Path -LiteralPath $Path)) { return $out }
+    $allowed = @($script:HvSidSystem, $script:HvSidAdmins, 'S-1-3-0') + @(Get-HvUserSids)
+    $mask = [int]([System.Security.AccessControl.FileSystemRights]::WriteData -bor [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+        [System.Security.AccessControl.FileSystemRights]::Delete -bor [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership -bor [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles)
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+        foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -ne 'Allow') { continue }
+            $sid = $rule.IdentityReference.Value
+            if ($allowed -contains $sid) { continue }
+            if (([int]$rule.FileSystemRights -band $mask) -ne 0) {
+                $name = $sid
+                try { $name = $rule.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { }
+                if ($out -notcontains $name) { $out += $name }
+            }
+        }
+    } catch { }
+    return $out
+}
+
 function Invoke-HvDoctor {
     $script:HvDocFail = 0
     $script:HvDocWarn = 0
@@ -185,6 +211,9 @@ function Invoke-HvDoctor {
     Write-HvStep '权限'
     if (Test-HvPrivateAcl (Get-HvSecretsDir)) { & $ok 'secrets\ 仅限 SYSTEM / 管理员 / 当前用户' } else { & $fail 'secrets\ 权限过宽（重新运行 install 修复）' }
     if (Test-HvPrivateAcl (Get-HvEnvPath)) { & $ok '.env 权限已收紧' } else { & $warn '.env 权限较宽' }
+    $fw = @(Get-HvForeignWriters (Get-HvRoot))
+    if ($fw.Count -eq 0) { & $ok 'HomeVault 程序目录只有管理员和当前用户可以修改' }
+    else { & $warn ('HomeVault 程序目录可被其他账户修改（' + ($fw -join '、') + '）：管理菜单以管理员身份运行其中的脚本，请以管理员身份重新运行 install 收紧权限') }
 
     Write-HvStep '日志与维护任务'
     $ld = Get-HvEnvLogDir

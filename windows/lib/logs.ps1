@@ -5,6 +5,8 @@
 # Compose services whose container output can be shown (Windows: no wg-easy / scrutiny).
 $script:HvLogServices = @('app', 'cron', 'db', 'redis', 'caddy', 'panel', 'socket-proxy', 'ddns-go')
 $script:HvDefaultLogLines = 200
+# Files a running service keeps writing (Caddy holds access.log open): never deleted by the retention job, as on Linux.
+$script:HvActiveLogNames = @('access.log', 'nextcloud.log', 'audit.log', 'panel.log')
 
 # ---------------------------------------------------------------- pure helpers
 
@@ -223,7 +225,7 @@ function Start-HvUxLog {
 }
 
 function Get-HvLogFileList {
-    # Managed log files below $Dir as FileInfo objects. Reparse points (symlinks/junctions) are never followed.
+    # Managed log files below $Dir as FileInfo objects. Symbolic links / junctions are never followed.
     param([string]$Dir, [int]$MaxDepth = 6)
     $out = New-Object System.Collections.Generic.List[object]
     if (-not $Dir -or -not [System.IO.Directory]::Exists($Dir)) { return $out.ToArray() }
@@ -234,7 +236,7 @@ function Get-HvLogFileList {
         $entries = @()
         try { $entries = @($cur.Dir.GetFileSystemInfos()) } catch { continue }
         foreach ($e in $entries) {
-            if (($e.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            if (Test-HvLinkItem $e) { continue }
             if ($e -is [System.IO.DirectoryInfo]) {
                 if ($cur.Depth -lt $MaxDepth) { $stack.Push([pscustomobject]@{ Dir = $e; Depth = ($cur.Depth + 1) }) }
             } elseif (Test-HvManagedLogName $e.Name) {
@@ -374,11 +376,25 @@ function Show-HvLogTarget {
         Stop-Hv ('找不到日志：' + $t + '（运行 logs list 查看全部日志文件；容器输出可用：' + ($script:HvLogServices -join ' ') + '）') 2
     }
     $fi = New-Object System.IO.FileInfo($full)
-    if (($fi.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Stop-Hv ('不支持符号链接：' + $full) 2 }
+    if (Test-HvLinkItem $fi) { Stop-Hv ('不支持符号链接：' + $full) 2 }
     Write-HvInfo ('== ' + $full + '（最后 ' + $Lines + ' 行，' + (ConvertTo-HvSizeText $fi.Length) + '）')
     foreach ($l in @(Get-HvFileTail -Path $full -Lines $Lines)) {
         if ($Raw) { Write-Host $l } else { Write-Host (Format-HvLogLine $l) }
     }
+}
+
+function Get-HvManagedLogFiles {
+    # Log files HomeVault itself writes: only below its own subfolders of HV_LOG_DIR (homevault, backup, nextcloud,
+    # caddy, containers, panel). HV_LOG_DIR may be an existing folder with the user's own *.txt / *.log files.
+    param([string]$Dir)
+    $subs = @('homevault', 'backup', 'nextcloud', 'caddy', 'containers', 'panel')
+    if (Get-Command Get-HvLogSubdirs -ErrorAction SilentlyContinue) { $subs = @(Get-HvLogSubdirs) }
+    $out = @()
+    foreach ($s in $subs) {
+        $d = Join-HvPath $Dir $s
+        if ([System.IO.Directory]::Exists($d) -and -not (Test-HvLinkItem $d)) { $out += @(Get-HvLogFileList $d) }
+    }
+    return $out
 }
 
 function Invoke-HvLogClean {
@@ -386,7 +402,8 @@ function Invoke-HvLogClean {
     param([int]$Days = 0)
     if ($Days -lt 1) { $Days = Get-HvLogRetentionDays }
     $dir = Get-HvLogDir
-    $expired = @(Select-HvExpiredLogFiles -Files (Get-HvLogFileList $dir) -Days $Days -Now (Get-Date))
+    $candidates = @(Get-HvManagedLogFiles $dir | Where-Object { $script:HvActiveLogNames -notcontains $_.Name })
+    $expired = @(Select-HvExpiredLogFiles -Files $candidates -Days $Days -Now (Get-Date))
     $n = 0
     $failed = @()
     foreach ($f in $expired) {

@@ -93,6 +93,8 @@ EOF
   sudo $HV_SELF storage remove <名称> [--apply]  从 HomeVault 移除（不删除文件）
   sudo $HV_SELF storage apply [--acl]            生成 compose.storage.yaml，重建容器并同步 Nextcloud 挂载
 storage.conf 格式：名称|主机路径|rw或ro|是否备份(yes/no)|可见用户(空=所有用户; 逗号分隔; @开头为群组)
+不允许：系统目录（/、/etc、/root、/var/lib/docker 等），以及与 HomeVault 自身目录重叠的路径
+（程序目录、Nextcloud 数据、数据库、Caddy 证书、日志、备份仓库）——否则 Nextcloud 用户能看到其中的密钥和数据。
 EOF
 		;;
 	backup)

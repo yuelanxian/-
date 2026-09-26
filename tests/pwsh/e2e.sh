@@ -102,6 +102,10 @@ expect "panel stat mounts generated" grep -q 'target: /stat/storage/' "$R/compos
 echo "== up --wait"
 hv up --wait || bad "up --wait"
 hv status >/dev/null || bad "status"
+out=$(hv ps 2>&1) || bad "ps (alias of status)"
+expect "ps alias lists the panel" has "$out" 'panel'
+out=$(hv compose ps --services 2>&1) || bad "compose passthrough"
+expect "compose passthrough" has "$out" 'socket-proxy'
 panel_state=missing
 for _ in $(seq 1 40); do
 	panel_state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$PROJECT-panel-1" 2>/dev/null || echo missing)
@@ -115,6 +119,18 @@ for t in /stat/data /stat/backup /config/storage.conf; do expect "panel mount $t
 expect "panel mount /state read-only" has "$mounts" "/state false"
 expect "panel mount /state/requests writable" has "$mounts" "/state/requests true"
 expect "panel mount /state/requests/done read-only" has "$mounts" "/state/requests/done false"
+# what the panel container can write: mount flags checked as root, so file ownership plays no role
+# (Docker Desktop bind mounts on Windows have no ownership checks at all)
+probe=$(docker run --rm --volumes-from "$PROJECT-panel-1" -u 0:0 alpine:3 sh -c '
+	touch /state/.e2e-probe 2>/dev/null && echo state-rw && rm -f /state/.e2e-probe
+	touch /state/requests/.e2e-probe 2>/dev/null && echo requests-rw && rm -f /state/requests/.e2e-probe
+	touch /state/requests/done/.e2e-probe 2>/dev/null && echo done-rw && rm -f /state/requests/done/.e2e-probe
+	touch /stat/data/.e2e-probe 2>/dev/null && echo data-rw && rm -f /stat/data/.e2e-probe
+	true' 2>&1 || true)
+expect "panel cannot write state/" lacks "$probe" state-rw
+expect "panel can write state/requests" has "$probe" requests-rw
+expect "panel cannot write state/requests/done" lacks "$probe" done-rw
+expect "panel cannot write /stat/data" lacks "$probe" data-rw
 expect "panel mount /stat/storage/<slug>" has "$mounts" "/stat/storage/s"
 hz=$(curl -sk --max-time 10 "https://127.0.0.1:$PANEL/healthz" || true)
 expect "panel /healthz through Caddy on the panel port" test "$hz" = ok

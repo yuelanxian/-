@@ -158,3 +158,26 @@ test_mirror_rewrite() {
 	# locally built image untouched
 	assert_eq 'homevault/caddy-dns:2.11.4' "$(mirror_rewrite homevault/caddy-dns:2.11.4 docker.m.daocloud.io/ ghcr.m.daocloud.io/)"
 }
+
+test_host_normalize_and_validate() {
+	assert_eq nas.example.com "$(hv_normalize_host '  https://NAS.Example.com:443/index.php ')"
+	assert_eq 192.168.1.10 "$(hv_normalize_host 'http://192.168.1.10:8080')"
+	assert_eq vpn.example.com "$(hv_normalize_host 'vpn.example.com:51820')"
+	local h
+	for h in 192.168.1.10 nas.example.com localhost a-b.c1.cn; do assert_ok valid_host "$h"; done
+	for h in '' 999.1.1.1 1.2.3 'a b' 'https://x.cn' 'x.cn:443' '*.x.cn' '-x.cn' 'x_y.cn' 'x.cn{' '::1'; do assert_fail valid_host "$h"; done
+	for h in a@b.cn first.last+tag@mail.example.com; do assert_ok valid_email "$h"; done
+	for h in 'a b@c.cn' 'a@b' '@b.cn' "a'@b.cn" 'a@b.cn}'; do assert_fail valid_email "$h"; done
+	HV_HOST=192.168.1.10 HV_TLS_MODE=internal HV_HTTP_PORT=80 HV_HTTPS_PORT=443 HV_ADMIN_PORT=8443 HV_PANEL_PORT=9443
+	HV_LOG_RETENTION_DAYS=7 HV_EXTRA_HOSTS='' HV_BIND_IP=192.168.1.10 HV_PLATFORM=linux HV_VPN_ENABLED=true WG_HOST=vpn.example.com
+	assert_ok hv_validate_env
+	HV_EXTRA_HOSTS='nas.lan https://oops' assert_fail hv_validate_env
+	HV_BIND_IP='::' assert_fail hv_validate_env
+	HV_BIND_IP='' assert_ok hv_validate_env
+	WG_HOST='vpn.example.com:51820' assert_fail hv_validate_env
+	HV_VPN_ENABLED=false WG_HOST='bad host' assert_ok hv_validate_env
+	HV_HOST=https://nas.example.com assert_fail hv_validate_env
+	HV_HOST=nas.example.com HV_TLS_MODE=acme-dns HV_DNS_PROVIDER=alidns HV_ACME_EMAIL='' assert_ok hv_validate_env
+	HV_HOST=nas.example.com HV_TLS_MODE=acme-dns HV_DNS_PROVIDER=alidns HV_ACME_EMAIL='me@example.cn' assert_ok hv_validate_env
+	HV_HOST=nas.example.com HV_TLS_MODE=acme-dns HV_DNS_PROVIDER=alidns HV_ACME_EMAIL='me at example' assert_fail hv_validate_env
+}

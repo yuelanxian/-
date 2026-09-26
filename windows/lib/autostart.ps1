@@ -12,6 +12,24 @@ function Get-HvDockerDesktopExe {
     return ''
 }
 
+function Find-HvAutologonExe {
+    # Sysinternals Autologon: on PATH, or in winget's "Links" folders (a winget install is not on this session's PATH yet).
+    $c = @(Get-Command 'autologon64.exe', 'autologon.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($c.Count -gt 0) { return $c[0].Path }
+    $dirs = @()
+    foreach ($v in @('LOCALAPPDATA', 'ProgramFiles')) {
+        $b = [System.Environment]::GetEnvironmentVariable($v)
+        if ($b) { $dirs += (Join-HvPath $b 'Microsoft\WinGet\Links'); $dirs += (Join-HvPath $b 'WinGet\Links') }
+    }
+    foreach ($d in $dirs) {
+        foreach ($n in @('autologon64.exe', 'autologon.exe', 'Autologon64.exe', 'Autologon.exe')) {
+            $f = Join-HvPath $d $n
+            if ([System.IO.File]::Exists($f)) { return $f }
+        }
+    }
+    return ''
+}
+
 function Get-HvAutostartState {
     $s = [pscustomobject]@{ DockerAutostart = $false; Autologon = $false; AutologonUser = ''; LockTask = $false; DockerExe = '' }
     if (-not (Test-HvWindows)) { return $s }
@@ -75,16 +93,16 @@ function Invoke-HvAutostart {
         Write-HvWarn 'Docker Desktop 必须有用户登录才会运行：停电/重启后如果无人登录，Nextcloud 就不可用。'
         Write-HvInfo '推荐：使用微软官方的 Sysinternals Autologon 配置自动登录（密码以 LSA 机密加密保存；开机时按住 Shift 可跳过）。'
         Write-HvInfo '建议为 HomeVault 使用一个专用的本地账户（加入 docker-users 组），并在该账户下运行 Docker Desktop。'
-        $exe = @(Get-Command 'autologon64.exe', 'autologon.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
-        if ($exe.Count -eq 0 -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+        $exe = Find-HvAutologonExe
+        if (-not $exe -and (Get-Command winget -ErrorAction SilentlyContinue)) {
             if (Read-HvYesNo '现在用 winget 安装 Sysinternals Autologon？' $true) {
                 [void](Invoke-HvNative -FilePath 'winget' -ArgumentList @('install', '-e', '--id', 'Microsoft.Sysinternals.Autologon', '--accept-package-agreements', '--accept-source-agreements') -AllowFailure)
-                $exe = @(Get-Command 'autologon64.exe', 'autologon.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+                $exe = Find-HvAutologonExe
             }
         }
-        if ($exe.Count -gt 0) {
+        if ($exe) {
             if (Read-HvYesNo '现在打开 Autologon 设置窗口？（在窗口中输入用户名和密码，点 Enable）' $true) {
-                try { Start-Process -FilePath $exe[0].Path -Wait } catch { Write-HvWarn ('无法启动 Autologon：' + $_.Exception.Message) }
+                try { Start-Process -FilePath $exe -Wait } catch { Write-HvWarn ('无法启动 Autologon：' + $_.Exception.Message) }
             }
         } else {
             Write-HvInfo '手动下载：https://learn.microsoft.com/sysinternals/downloads/autologon'
