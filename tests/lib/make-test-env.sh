@@ -11,14 +11,17 @@
 #   --http-port N               default 18080
 #   --https-port N              default 18443
 #   --admin-port N              default 18444
-#   --data-dir DIR              default <target>/data (created; nextcloud-data gets 33:33 0750)
+#   --panel-port N              HV_PANEL_PORT, default 18445
+#   --log-days N                HV_LOG_RETENTION_DAYS, default 7
+#   --data-dir DIR              default <target>/data (created; nextcloud-data gets 33:33 0750;
+#                               logs/ = HV_LOG_DIR like "hv logs" creates it: nextcloud 33:33, panel 65532)
 #   --tls-mode M                internal | acme-alidns | acme-tencentcloud | acme-cloudflare (default internal)
 #   --project NAME              COMPOSE_PROJECT_NAME, default hvtest
 #   --subnet CIDR               HV_FRONTEND_SUBNET, default 172.31.250.0/24
 #   --allowed-cidrs STR         HV_ALLOWED_CIDRS, default from .env.example
-#   --vpn                       HV_ADMIN_SNIPPET=wgeasy (Linux only)
-#   --no-chown                  do not chown nextcloud-data to 33:33 (static checks only)
-#   --copy-repo                 also copy compose*.yaml, caddy/ and nextcloud/ into <target>
+#   --vpn                       HV_VPN_ENABLED=true + HV_ADMIN_SNIPPET=wgeasy (Linux only; default: VPN off)
+#   --no-chown                  do not chown nextcloud-data / logs (static checks only)
+#   --copy-repo                 also copy compose*.yaml, caddy/, nextcloud/ and panel/ into <target>
 #                               (then run: docker compose --project-directory <target> -f <target>/compose.yaml --env-file <target>/.env …)
 #   --repo DIR                  repository root (default: two levels above this script)
 set -euo pipefail
@@ -40,6 +43,8 @@ bind_ip=127.0.0.1
 http_port=18080
 https_port=18443
 admin_port=18444
+panel_port=18445
+log_days=7
 data_dir=''
 tls_mode=internal
 project=hvtest
@@ -58,6 +63,8 @@ while [[ $# -gt 0 ]]; do
 	--http-port) http_port=$2; shift 2 ;;
 	--https-port) https_port=$2; shift 2 ;;
 	--admin-port) admin_port=$2; shift 2 ;;
+	--panel-port) panel_port=$2; shift 2 ;;
+	--log-days) log_days=$2; shift 2 ;;
 	--data-dir) data_dir=$2; shift 2 ;;
 	--tls-mode) tls_mode=$2; shift 2 ;;
 	--project) project=$2; shift 2 ;;
@@ -108,7 +115,11 @@ site_addresses=${site_addresses%, }
 cli_url="https://$host"
 [[ $https_port == 443 ]] || cli_url+=":$https_port"
 admin_snippet=none
-[[ $vpn == 1 && $platform == linux ]] && admin_snippet=wgeasy
+vpn_enabled=false
+if [[ $vpn == 1 && $platform == linux ]]; then
+	admin_snippet=wgeasy
+	vpn_enabled=true
+fi
 
 # ---------------------------------------------------------------- .env
 env_file=$target/.env
@@ -139,6 +150,7 @@ set_kv HV_BIND_IP "$bind_ip"
 set_kv HV_HTTP_PORT "$http_port"
 set_kv HV_HTTPS_PORT "$https_port"
 set_kv HV_ADMIN_PORT "$admin_port"
+set_kv HV_PANEL_PORT "$panel_port"
 [[ -z $allowed ]] || set_kv HV_ALLOWED_CIDRS "$allowed"
 set_kv HV_FRONTEND_SUBNET "$subnet"
 set_kv HV_SITE_ADDRESSES "$site_addresses"
@@ -152,6 +164,10 @@ set_kv HV_DNS_PROVIDER "$dns_provider"
 set_kv HV_DATA_DIR "$data_dir"
 set_kv HV_NC_DATA_PATH "$data_dir/nextcloud-data"
 set_kv HV_DUMP_DIR "$data_dir/dumps"
+set_kv HV_LOG_DIR "$data_dir/logs"
+set_kv HV_LOG_RETENTION_DAYS "$log_days"
+set_kv HV_VPN_ENABLED "$vpn_enabled"
+set_kv HV_MONITOR_ENABLED false
 set_kv HV_BACKUP_LOCAL_PATH "$data_dir/backup-repo"
 set_kv HV_VPN_CIDR "$vpn_cidr"
 set_kv WG_HOST "vpn.homevault.test"
@@ -181,14 +197,43 @@ if [[ $do_chown == 1 ]] && ! chown 33:33 "$data_dir/nextcloud-data" 2>/dev/null;
 		printf 'make-test-env: warning: could not chown %s to 33:33\n' "$data_dir/nextcloud-data" >&2
 fi
 
+# logs (SPEC §14) — same layout/ownership as "hv logs" creates on Linux
+logs=$data_dir/logs
+mkdir -p "$logs"/{homevault,backup,containers,caddy,nextcloud,panel}
+chmod 0755 "$logs" "$logs"/{homevault,backup,containers,caddy}
+chmod 0750 "$logs/nextcloud" "$logs/panel"
+if [[ $do_chown == 1 ]]; then
+	for pair in nextcloud:33 panel:65532; do
+		d=$logs/${pair%%:*} id=${pair#*:}
+		chown "$id:$id" "$d" 2>/dev/null || sudo -n chown "$id:$id" "$d" 2>/dev/null ||
+			printf 'make-test-env: warning: could not chown %s to %s\n' "$d" "$id" >&2
+	done
+	# the panel (uid 65532) reads every log read-only
+	if command -v setfacl >/dev/null 2>&1 && setfacl -R -m u:65532:rX -m d:u:65532:rX "$logs" 2>/dev/null; then
+		:
+	else
+		chmod 0755 "$logs/nextcloud"
+	fi
+fi
+
+# state/ (panel request files) — relative to the compose project directory (= <target> with --copy-repo)
+mkdir -p "$target/state/requests/done"
+chmod 0755 "$target/state"
+if [[ $do_chown == 1 ]]; then
+	chown 65532:65532 "$target/state/requests" 2>/dev/null ||
+		sudo -n chown 65532:65532 "$target/state/requests" 2>/dev/null || chmod 1777 "$target/state/requests"
+fi
+
 # ---------------------------------------------------------------- optional repo copy
 if [[ $copy_repo == 1 ]]; then
 	for f in compose.yaml compose.acme.yaml; do
 		cp "$repo/$f" "$target/$f"
 	done
-	rm -rf "$target/caddy" "$target/nextcloud"
+	rm -rf "$target/caddy" "$target/nextcloud" "$target/panel"
 	cp -a "$repo/caddy" "$target/caddy"
 	cp -a "$repo/nextcloud" "$target/nextcloud"
+	# build context of the panel image (docker compose build panel)
+	[[ ! -d $repo/panel ]] || cp -a "$repo/panel" "$target/panel"
 fi
 
 printf '%s\n' "$env_file"

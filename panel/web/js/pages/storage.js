@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { h, clear, icon, bar, fmtBytes, fmtNum, relTime, spinner, errorBox, kv, pageTitle, usageClass } from '../ui.js';
 
-const ROLE_BADGE = { data: 'info', storage: 'purple', backup: 'ok' };
+const ROLE_BADGE = { data: 'info', storage: 'purple', backup: 'ok', system: '', other: '' };
 
 export function render(view) {
   let alive = true;
@@ -27,7 +27,9 @@ export function render(view) {
 
     body.appendChild(h('div.section-title', '硬盘'));
     if (!d.disks.length) {
-      body.appendChild(h('div.card.empty-state', '没有可统计的磁盘（面板容器未挂载 /stat 目录）。'));
+      body.appendChild(h('div.card.empty-state', '没有可统计的磁盘（面板容器未挂载 /stat 目录，主机也未写入磁盘信息）。'));
+    } else if (d.disks_source === 'host') {
+      body.appendChild(h('p.small.muted', '以下数据来自主机每日写入的状态文件（面板容器未挂载 /stat 目录）。'));
     }
     for (const disk of d.disks) {
       const card = h('div.card',

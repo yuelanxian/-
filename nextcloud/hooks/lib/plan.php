@@ -101,6 +101,8 @@ if ($subnet !== '') {
 $tz = envs('HV_TZ', 'Asia/Shanghai');
 if (in_array($tz, timezone_identifiers_list(), true)) {
 	$desired['default_timezone'] = $tz;
+	// log timestamps in local time (the logs are read by humans in the panel / on the host)
+	$desired['logtimezone'] = $tz;
 } else {
 	out('INFO 警告: HV_TZ=' . $tz . ' 不是有效时区，已跳过 default_timezone');
 }
@@ -117,6 +119,22 @@ if (ctype_digit($mw) && (int)$mw >= 0 && (int)$mw <= 23) {
 	$desired['maintenance_window_start'] = (int)$mw;
 } else {
 	out('INFO 警告: HV_MAINTENANCE_WINDOW_UTC=' . $mw . ' 应为 0-23 的整数，已跳过');
+}
+
+// Logs (SPEC §14): nextcloud.log + audit.log in the bind mount of ${HV_LOG_DIR}/nextcloud.
+// Only when www-data can write there; otherwise Nextcloud keeps logging into the data directory.
+$logDir = rtrim(envs('HV_NC_LOG_DIR'), '/');
+if ($logDir !== '') {
+	if (is_dir($logDir) && is_writable($logDir)) {
+		$desired['log_type'] = 'file';
+		$desired['logfile'] = $logDir . '/nextcloud.log';
+		$desired['log_type_audit'] = 'file';
+		$desired['logfile_audit'] = $logDir . '/audit.log';
+		$desired['log_rotate_size'] = 50 * 1024 * 1024;
+	} else {
+		out('INFO 警告: 日志目录 ' . $logDir . ' 不存在或 www-data 无写权限，Nextcloud 日志仍写在数据目录'
+			. '（Linux 宿主机：sudo chown 33:33 <HV_LOG_DIR>/nextcloud，然后 ./hv restart）');
+	}
 }
 
 $changed = [];

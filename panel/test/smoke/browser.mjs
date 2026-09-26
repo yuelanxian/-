@@ -6,7 +6,8 @@ const { chromium } = require('playwright');
 let jsQR = null;
 try { jsQR = createRequire((process.env.JSQR_DIR || process.cwd()) + '/')('jsqr'); } catch { /* QR decode check skipped */ }
 
-const PANEL = 'https://127.0.0.1:38444';
+const PANEL = 'https://127.0.0.1:' + (process.env.SMOKE_PANEL_PORT || '19444');
+const NC_PORT = process.env.SMOKE_NC_PORT || '19443';
 const shots = process.argv[2] || 'shots';
 const problems = [];
 
@@ -26,7 +27,7 @@ await page.goto(PANEL + '/');
 await page.getByRole('button', { name: '使用 Nextcloud 登录' }).waitFor({ timeout: 15000 });
 await snap('01-login');
 await page.getByRole('button', { name: '使用 Nextcloud 登录' }).click();
-await page.waitForURL(/127\.0\.0\.1:38443\/login\/v2\/flow/, { timeout: 15000 });
+await page.waitForURL(new RegExp('127\\.0\\.0\\.1:' + NC_PORT + '/login/v2/flow'), { timeout: 15000 });
 await page.waitForLoadState('networkidle');
 await snap('02-nc-authpicker');
 // Auth picker → "Log in"
@@ -86,7 +87,7 @@ const qrs = await page.evaluate(() => [...document.querySelectorAll('.qr-box can
 for (const q of jsQR ? qrs : []) {
   const r = jsQR(Uint8ClampedArray.from(q.data), q.w, q.h);
   console.log('QR decoded:', r ? r.data : null);
-  if (!r || !/^https:\/\/127\.0\.0\.1:38444\/(download\/android|ca\.crt)$/.test(r.data)) problems.push('QR decode failed: ' + (r && r.data));
+  if (!r || !new RegExp('^' + PANEL.replace(/\./g, '\\.') + '/(download/android|ca\\.crt)$').test(r.data)) problems.push('QR decode failed: ' + (r && r.data));
 }
 
 // retention change through the UI (custom dialog, no window.confirm)
@@ -130,6 +131,27 @@ await dk.goto(PANEL + '/#/overview');
 await dk.locator('h2', { hasText: '系统概览' }).waitFor({ timeout: 10000 });
 await dk.waitForTimeout(800);
 await dk.screenshot({ path: `${shots}/19-desktop.png` });
+
+// normal browser (no HomeVaultApp in the User-Agent): the Nextcloud login page opens in a new tab
+// and the panel tab keeps waiting/polling
+const plain = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, locale: 'zh-CN' });
+const pp = await plain.newPage();
+pp.on('pageerror', (e) => problems.push('plain pageerror: ' + e.message));
+await pp.goto(PANEL + '/');
+await pp.getByRole('button', { name: '使用 Nextcloud 登录' }).waitFor({ timeout: 15000 });
+const [popup] = await Promise.all([
+  plain.waitForEvent('page', { timeout: 15000 }),
+  pp.getByRole('button', { name: '使用 Nextcloud 登录' }).click(),
+]);
+await popup.waitForURL(new RegExp('127\\.0\\.0\\.1:' + NC_PORT + '/login/v2/'), { timeout: 15000 }).catch(() => {});
+if (!new RegExp(':' + NC_PORT + '/login/v2/').test(popup.url())) problems.push('new tab did not open the Nextcloud login page: ' + popup.url());
+if (!pp.url().startsWith(PANEL)) problems.push('panel tab navigated away: ' + pp.url());
+await pp.getByText('已在新标签页打开 Nextcloud 登录页').waitFor({ timeout: 10000 }).catch(() => problems.push('waiting hint missing'));
+if (await popup.evaluate(() => window.opener !== null)) problems.push('login tab keeps window.opener');
+await pp.screenshot({ path: `${shots}/20-login-newtab-waiting.png` });
+await pp.getByRole('button', { name: '取消' }).click();
+await pp.getByRole('button', { name: '使用 Nextcloud 登录' }).waitFor({ timeout: 10000 });
+await plain.close();
 
 // horizontal overflow check on mobile pages
 for (const hash of ['#/overview', '#/storage', '#/backup', '#/logs', '#/vpn', '#/settings']) {

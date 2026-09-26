@@ -1,4 +1,4 @@
-# HomeVault — 全部服务（可选服务用 profiles：vpn / ddns / monitor / tools）。
+# HomeVault — 全部服务（默认启动：app cron db redis caddy panel socket-proxy；可选服务用 profiles：vpn / ddns / monitor / tools）。
 # 所有值来自 .env（由 ./hv 或 windows\hv.ps1 生成）；请勿直接修改本文件。
 # 标准调用：docker compose -f compose.yaml [-f compose.acme.yaml] [-f compose.storage.yaml] --env-file .env [--profile …] <命令>
 name: homevault
@@ -48,6 +48,8 @@ x-nextcloud: &nextcloud
     HV_MAINTENANCE_WINDOW_UTC: ${HV_MAINTENANCE_WINDOW_UTC:-18}
     HV_FRONTEND_SUBNET: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
     HV_REPAIR_EXPENSIVE: ${HV_REPAIR_EXPENSIVE:-false}
+    # 容器内日志目录（宿主机 HV_LOG_DIR/nextcloud）：hooks 把 logfile / logfile_audit 指向这里
+    HV_NC_LOG_DIR: /var/log/homevault/nextcloud
   secrets:
     - postgres_password
     - redis_password
@@ -60,6 +62,8 @@ x-nextcloud: &nextcloud
     - ./nextcloud/hooks/before-starting:/docker-entrypoint-hooks.d/before-starting:ro
     - ./nextcloud/hooks/post-upgrade:/docker-entrypoint-hooks.d/post-upgrade:ro
     - ./nextcloud/hooks/lib:/opt/homevault/hooks-lib:ro
+    # nextcloud.log + audit.log（Linux 宿主机目录属主 33:33）
+    - ${HV_LOG_DIR:?HV_LOG_DIR 未设置（日志目录），请运行 hv up 或 hv install}/nextcloud:/var/log/homevault/nextcloud
 
 services:
   app:
@@ -173,6 +177,7 @@ services:
       - "${HV_BIND_IP:?HV_BIND_IP 未设置，请先运行 hv install}:${HV_HTTP_PORT:-80}:${HV_HTTP_PORT:-80}/tcp"
       - "${HV_BIND_IP:?HV_BIND_IP 未设置，请先运行 hv install}:${HV_HTTPS_PORT:-443}:${HV_HTTPS_PORT:-443}/tcp"
       - "${HV_BIND_IP:?HV_BIND_IP 未设置，请先运行 hv install}:${HV_ADMIN_PORT:-8443}:${HV_ADMIN_PORT:-8443}/tcp"
+      - "${HV_BIND_IP:?HV_BIND_IP 未设置，请先运行 hv install}:${HV_PANEL_PORT:-9443}:${HV_PANEL_PORT:-9443}/tcp"
     environment:
       HV_HOST: ${HV_HOST:?HV_HOST 未设置，请先运行 hv install}
       HV_SITE_ADDRESSES: ${HV_SITE_ADDRESSES:?HV_SITE_ADDRESSES 未设置，请运行 hv up 重新生成}
@@ -180,6 +185,8 @@ services:
       HV_HTTP_PORT: ${HV_HTTP_PORT:-80}
       HV_HTTPS_PORT: ${HV_HTTPS_PORT:-443}
       HV_ADMIN_PORT: ${HV_ADMIN_PORT:-8443}
+      HV_PANEL_PORT: ${HV_PANEL_PORT:-9443}
+      HV_LOG_RETENTION_DAYS: ${HV_LOG_RETENTION_DAYS:-7}
       HV_TLS_SNIPPET: ${HV_TLS_SNIPPET:-internal}
       HV_ADMIN_SNIPPET: ${HV_ADMIN_SNIPPET:-none}
       HV_ACME_EMAIL: ${HV_ACME_EMAIL:-}
@@ -192,17 +199,156 @@ services:
       - ./caddy:/etc/caddy:ro
       - ${HV_VOL_CADDY_DATA:-caddy_data}:/data
       - ${HV_VOL_CADDY_CONFIG:-caddy_config}:/config
+      # 访问日志 access.log
+      - ${HV_LOG_DIR:?HV_LOG_DIR 未设置（日志目录），请运行 hv up 或 hv install}/caddy:/var/log/homevault/caddy
+      # 只放本地 CA 的根证书（公开内容，不含私钥），供管理面板提供 /ca.crt 下载
+      - ca_public:/ca-public
     depends_on:
       app:
         condition: service_started
     networks:
       - frontend
     healthcheck:
-      test: ["CMD-SHELL", "nc -z -w 3 127.0.0.1 \"$$HV_HTTPS_PORT\""]
+      # 顺带把根证书复制到 ca_public 卷：Caddy 的 pki 目录是 0700/0600（root），面板（uid 65532）读不到，
+      # 而且面板绝不能挂载含 root.key 的 /data。域名模式（acme）不需要安装根证书，删除副本。
+      test:
+        - CMD-SHELL
+        - >-
+          s=/data/caddy/pki/authorities/local/root.crt; d=/ca-public/root.crt;
+          if [ "$$HV_TLS_SNIPPET" = internal ] && [ -s "$$s" ]; then
+          cmp -s "$$s" "$$d" || { cp "$$s" "$$d.tmp" && chmod 0644 "$$d.tmp" && mv -f "$$d.tmp" "$$d"; };
+          else rm -f "$$d"; fi >/dev/null 2>&1;
+          nc -z -w 3 127.0.0.1 "$$HV_HTTPS_PORT"
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 1m
+      start_interval: 2s
+
+  # ---------------------------------------------------------------- 管理面板（安卓 App / 浏览器的服务端）
+  # https://HV_HOST:HV_PANEL_PORT（经 Caddy）。用 Nextcloud 管理员账号登录（含两步验证）。
+  # 镜像在本机由 panel/Dockerfile 构建，永不从镜像仓库拉取（缺失时 up 自动构建；更新：docker compose build panel）。
+  # 挂载：日志只读（面板自己的审计日志 logs/panel 可写）、state/（面板只写 state/requests/）、根证书副本只读；
+  # /stat/*（各硬盘容量）与 /config/storage.conf 由 hv storage apply 写入 compose.storage.yaml。
+  panel:
+    image: ${PANEL_IMAGE:-homevault/panel:1.0.0}
+    pull_policy: never
+    build:
+      context: ./panel
+      args:
+        # Go 构建镜像的仓库前缀；国内镜像由 HV_MIRROR_HUB 提供（必须以 / 结尾，例如 docker.m.daocloud.io/）
+        REGISTRY: ${HV_MIRROR_HUB:-docker.io/}library
+    restart: unless-stopped
+    logging: *logging
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HV_HOST: ${HV_HOST:?HV_HOST 未设置，请先运行 hv install}
+      # 浏览器访问 Nextcloud 的地址（登录流程、跳转链接）
+      HV_PUBLIC_URL: ${HV_OVERWRITE_CLI_URL:-}
+      # 面板在容器网络内直接访问 Nextcloud（带 Host: HV_HOST[:端口] 请求头）
+      NC_INTERNAL_URL: http://app:80
+      DOCKER_HOST: tcp://socket-proxy:2375
+      COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-homevault}
+      LOG_DIR: /logs
+      STATE_DIR: /state
+      STAT_DIR: /stat
+      CA_CERT_FILE: /ca/root.crt
+      # 只信任 Caddy 所在网段传来的 X-Forwarded-For
+      PANEL_TRUSTED_PROXIES: ${HV_FRONTEND_SUBNET:-172.31.250.0/24}
+      HV_LOG_RETENTION_DAYS: ${HV_LOG_RETENTION_DAYS:-7}
+      # HomeVault 版本（由 hv / hv.ps1 在调用 compose 时通过进程环境传入；可为空）
+      HV_VERSION: ${HV_VERSION:-}
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    volumes:
+      - ${HV_LOG_DIR:?HV_LOG_DIR 未设置（日志目录），请运行 hv up 或 hv install}:/logs:ro
+      # 面板审计日志 panel.log（Linux 宿主机目录属主 65532）
+      - ${HV_LOG_DIR:?HV_LOG_DIR 未设置（日志目录），请运行 hv up 或 hv install}/panel:/logs/panel
+      - ./state:/state
+      - ca_public:/ca:ro
+    depends_on:
+      socket-proxy:
+        condition: service_started
+    networks:
+      - frontend
+      - dockerapi
+    healthcheck:
+      test: ["CMD", "/panel", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+
+  # ---------------------------------------------------------------- Docker API 过滤代理（只给管理面板用）
+  # 唯一挂载 docker.sock 的容器；只接入 internal 网络 dockerapi，端口不发布。
+  # 允许：容器列表/详情/日志、info、version、_ping、重启容器（上游的 ALLOW_RESTARTS 同时放行 stop/kill）；
+  # 其余一律拒绝（POST=0 → 只读；exec、create、镜像、卷、网络、archive/export、events 等全部关闭）。
+  socket-proxy:
+    image: ${SOCKET_PROXY_IMAGE:-docker.io/linuxserver/socket-proxy:3.4.5-r0-ls99}
+    restart: unless-stopped
+    logging: *logging
+    read_only: true
+    tmpfs:
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CONTAINERS: "1"
+      ALLOW_LOGS: "1"
+      ALLOW_RESTARTS: "1"
+      INFO: "1"
+      VERSION: "1"
+      PING: "1"
+      POST: "0"
+      ALLOW_START: "0"
+      ALLOW_STOP: "0"
+      ALLOW_PAUSE: "0"
+      ALLOW_UNPAUSE: "0"
+      ALLOW_ARCHIVE: "0"
+      ALLOW_CHANGES: "0"
+      ALLOW_EXPORT: "0"
+      ALLOW_TOP: "0"
+      AUTH: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      EVENTS: "0"
+      EXEC: "0"
+      GRPC: "0"
+      IMAGES: "0"
+      NETWORKS: "0"
+      NODES: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+      VOLUMES: "0"
+      LIBPOD_PING: "0"
+      LIBPOD_VERSION: "0"
+      DISABLE_IPV6: "1"
+      LOG_LEVEL: warning
+      TZ: ${HV_TZ:-Asia/Shanghai}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - dockerapi
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2375/_ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
       start_interval: 2s
 
   # ---------------------------------------------------------------- 可选：VPN（仅 Linux）
@@ -326,6 +472,11 @@ networks:
     driver: bridge
     internal: true
     enable_ipv6: false
+  # 只有 panel 与 socket-proxy：Docker API 不经过任何其他网络
+  dockerapi:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
 
 secrets:
   postgres_password:
@@ -351,3 +502,5 @@ volumes:
   hv_dumps:
   hv_empty:
   hv_repo_unset:
+  # Caddy 本地 CA 根证书的公开副本（由 caddy 健康检查维护，面板只读）
+  ca_public:

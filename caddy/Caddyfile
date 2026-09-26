@@ -21,7 +21,25 @@
 	import snippets/tls-{$HV_TLS_SNIPPET}.caddy
 }
 
+# 访问日志：宿主机 HV_LOG_DIR/caddy/access.log（JSON 行；Cookie/Authorization 等敏感请求头自动脱敏）。
+# 超过 50 MiB 滚动为压缩文件，保留 HV_LOG_RETENTION_DAYS 天；每日维护任务也会按天数清理。
+# mode 0640：配合宿主机日志目录的默认 ACL，管理面板（uid 65532）可以只读查看。
+(access_log) {
+	log {
+		output file /var/log/homevault/caddy/access.log {
+			mode 0640
+			roll_size 50MiB
+			roll_keep 20
+			roll_keep_for {$HV_LOG_RETENTION_DAYS}d
+			roll_local_time
+		}
+		format json
+	}
+}
+
 {$HV_SITE_ADDRESSES} {
+	import access_log
+
 	# route 保证按书写顺序执行：abort 必须先于 redir
 	route {
 		@outside not remote_ip {$HV_ALLOWED_CIDRS}
@@ -43,5 +61,21 @@
 	}
 }
 
-# 管理界面（Linux + VPN 时为 wg-easy，其余为空）
+# 管理面板（安卓 App / 浏览器）：https://HV_HOST:HV_PANEL_PORT，与主站共用证书和来源 IP 过滤。
+# 面板自身要求 Nextcloud 管理员登录（含两步验证）。
+https://{$HV_HOST}:{$HV_PANEL_PORT} {
+	import access_log
+
+	route {
+		@outside not remote_ip {$HV_ALLOWED_CIDRS}
+		abort @outside
+
+		header Strict-Transport-Security "max-age=15552000"
+		header -Server
+
+		reverse_proxy panel:8080
+	}
+}
+
+# wg-easy 管理界面（Linux + VPN 时为 wg-easy，其余为空）
 import snippets/admin-{$HV_ADMIN_SNIPPET}.caddy

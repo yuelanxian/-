@@ -150,3 +150,107 @@ func TestReadJSONRejectsNames(t *testing.T) {
 		t.Fatalf("missing file: %v", err)
 	}
 }
+
+func TestStatusAndBackupAliases(t *testing.T) {
+	// Canonical names win; older spellings are accepted as a fallback.
+	var st Status
+	if err := json.Unmarshal([]byte(`{"generated":"2026-09-26T03:00:00+08:00","homevault_version":"1.0.0","platform":"linux",`+
+		`"log_retention_days":14,"disks":[{"role":"主数据","name":"Nextcloud 数据","path":"/srv/hv/data","total":1000,"free":100,"mounted":true}]}`), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Updated.IsZero() || st.Version != "1.0.0" || st.LogRetentionDays != 14 || len(st.Disks) != 1 || st.Disks[0].Total != 1000 {
+		t.Fatalf("%+v", st)
+	}
+	var canon Status
+	_ = json.Unmarshal([]byte(`{"updated":"2026-09-26T01:00:00Z","generated":"2020-01-01T00:00:00Z","version":"a","homevault_version":"b"}`), &canon)
+	if canon.Version != "a" || canon.Updated.Year() != 2026 {
+		t.Fatalf("canonical must win: %+v", canon)
+	}
+
+	var bs BackupStatus
+	if err := json.Unmarshal([]byte(`{"last_run":"2026-09-26T03:30:00+08:00","finished":"2026-09-26T03:40:00+08:00","result":"partial",`+
+		`"exit_code":3,"message":"部分文件无法读取","last_ok":"2026-09-25T03:40:00+08:00","target":"local","log":"backup/backup-20260926-033000.log"}`), &bs); err != nil {
+		t.Fatal(err)
+	}
+	if bs.State != "partial" || bs.LastFinished.IsZero() || bs.LastSuccess.Day() != 25 || bs.LogFile != "backup/backup-20260926-033000.log" ||
+		bs.ExitCode == nil || *bs.ExitCode != 3 {
+		t.Fatalf("%+v", bs)
+	}
+	var bc BackupStatus
+	_ = json.Unmarshal([]byte(`{"state":"OK","result":"failed","last_success":"2026-09-26T00:00:00Z"}`), &bc)
+	if bc.State != "ok" || bc.LastSuccess.IsZero() {
+		t.Fatalf("%+v", bc)
+	}
+
+	var vs VPNStatus
+	_ = json.Unmarshal([]byte(`{"generated":"2026-09-26T03:00:00+08:00","interface":"wg0","peers":[{"name":"p","address":"10.99.77.2/32","latest_handshake":0}]}`), &vs)
+	if vs.Updated.IsZero() || len(vs.Peers) != 1 || vs.Peers[0].Address != "10.99.77.2/32" {
+		t.Fatalf("%+v", vs)
+	}
+}
+
+func TestDoneResultsMerged(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	s.Now = func() time.Time { return now }
+	done := filepath.Join(dir, "requests", "done")
+	if err := os.MkdirAll(done, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(done, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Linux runner: request moved to done/ + <id>.result.json
+	w("20260926T100000000Z-backup.json", `{"id":"20260926T100000000Z-backup","type":"backup","created":"2026-09-26T10:00:00Z","requested_by":"hvadmin"}`)
+	w("20260926T100000000Z-backup.result.json", `{"request":"20260926T100000000Z-backup.json","type":"backup","ok":false,"finished":"2026-09-26T10:05:00+00:00","message":"失败（退出码 1），详见日志"}`)
+	w("20260926T110000000Z-log-retention.json", `{"id":"20260926T110000000Z-log-retention","type":"log-retention","days":30,"created":"2026-09-26T11:00:00Z"}`)
+	w("20260926T110000000Z-log-retention.result.json", `{"request":"20260926T110000000Z-log-retention.json","type":"log-retention","ok":true,"finished":"2026-09-26T11:00:30Z","message":"完成"}`)
+	// moved but no result yet → running; very old → unknown
+	w("20260926T115900000Z-log-clean.json", `{"id":"20260926T115900000Z-log-clean","type":"log-clean","created":"2026-09-26T11:59:00Z"}`)
+	w("20260925T000000000Z-log-clean.json", `{"id":"20260925T000000000Z-log-clean","type":"log-clean","created":"2026-09-25T00:00:00Z"}`)
+	// Windows-style: status written into the request file itself (with BOM)
+	w("20260926T090000000Z-backup.json", "\xef\xbb\xbf"+`{"id":"20260926T090000000Z-backup","type":"backup","status":"ok","finished_at":"2026-09-26T09:10:00Z"}`)
+	// rejected unknown request
+	w("bogus.json", `{"type":"exec"}`)
+	w("bogus.result.json", `{"request":"bogus.json","type":"unknown","ok":false,"message":"请求无效或类型不在允许列表中"}`)
+
+	_, got := s.Requests(50)
+	byID := map[string]RequestStatus{}
+	for _, r := range got {
+		byID[r.ID] = r
+	}
+	if len(got) != 6 {
+		t.Fatalf("want 6 merged entries, got %d: %+v", len(got), got)
+	}
+	if r := byID["20260926T100000000Z-backup"]; r.State != "failed" || r.Finished == nil || r.Message == "" || r.RequestedBy != "hvadmin" {
+		t.Fatalf("backup: %+v", r)
+	}
+	if r := byID["20260926T110000000Z-log-retention"]; r.State != "ok" || r.Days != 30 {
+		t.Fatalf("retention: %+v", r)
+	}
+	if r := byID["20260926T115900000Z-log-clean"]; r.State != "running" {
+		t.Fatalf("running: %+v", r)
+	}
+	if r := byID["20260925T000000000Z-log-clean"]; r.State != "unknown" {
+		t.Fatalf("stale: %+v", r)
+	}
+	if r := byID["20260926T090000000Z-backup"]; r.State != "ok" || r.Finished == nil {
+		t.Fatalf("inline status: %+v", r)
+	}
+	if r := byID["bogus"]; r.State != "failed" || r.Type != "exec" {
+		t.Fatalf("bogus: %+v", r)
+	}
+	// newest first
+	if got[0].ID != "bogus" && got[0].ID != "20260926T115900000Z-log-clean" {
+		t.Fatalf("order: %v", got[0].ID)
+	}
+	// result files are never listed as pending requests
+	pdir := filepath.Join(dir, "requests")
+	_ = os.WriteFile(filepath.Join(pdir, "x.result.json"), []byte(`{"ok":true}`), 0o644)
+	if p, _ := s.Requests(0); len(p) != 0 {
+		t.Fatalf("pending %+v", p)
+	}
+}

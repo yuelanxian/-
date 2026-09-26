@@ -12,7 +12,8 @@ redistributed** in this repository. Each remains under its own license.
 
 | 文件 | 项目 | 版本 | 许可证 |
 |---|---|---|---|
-| `windows/vendor/qrcode.js` | [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) by Kazuhiko Arase | 2.0.4 | MIT |
+| `windows/vendor/qrcode.js`、`panel/web/vendor/qrcode.js`（同一文件） | [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) by Kazuhiko Arase | 2.0.4 | MIT |
+| `android/gradlew`、`android/gradlew.bat`、`android/gradle/wrapper/gradle-wrapper.jar` | [Gradle Wrapper](https://github.com/gradle/gradle) | 9.7.1 | Apache-2.0 |
 
 qrcode-generator 许可证全文：
 
@@ -55,6 +56,12 @@ SOFTWARE.
 | [restic](https://github.com/restic/restic) | 加密备份 | `restic/restic:0.19.1` | BSD-2-Clause |
 | [ddns-go](https://github.com/jeessy2/ddns-go) | 动态域名（可选） | `jeessy/ddns-go:v6.17.7` | MIT |
 | [Scrutiny](https://github.com/AnalogJ/scrutiny) | 硬盘 S.M.A.R.T. 监控（可选） | `ghcr.io/analogj/scrutiny:v0.9.4-omnibus` | MIT |
+| [LinuxServer.io socket-proxy](https://github.com/linuxserver/docker-socket-proxy)（基于 [HAProxy](https://www.haproxy.org/)） | 管理面板访问 Docker API 的过滤代理（只读 + 重启） | `linuxserver/socket-proxy:3.4.5-r0-ls99` | GPL-3.0（HAProxy：GPL-2.0+ / LGPL-2.1） |
+
+### 本地构建的管理面板镜像 / Management panel image built locally (`panel/Dockerfile`)
+
+`homevault/panel` 由用户的机器从本仓库源码编译（构建镜像 `golang:1.26-alpine`，运行镜像为空的 `scratch`），产物不随仓库分发。
+面板只使用 Go 标准库（无第三方模块）；编译出的静态二进制包含 [Go](https://go.dev/) 标准库与运行时（BSD-3-Clause，含时区数据 `time/tzdata`）。
 
 ### 域名模式下本地构建的 Caddy / Caddy built locally for DNS-01 (`caddy/Dockerfile`)
 
@@ -66,6 +73,11 @@ SOFTWARE.
 | github.com/caddy-dns/alidns（含 libdns/alidns） | v1.0.29 | MIT |
 | github.com/caddy-dns/tencentcloud（含 libdns/tencentcloud） | v0.4.3 | MIT |
 | github.com/caddy-dns/cloudflare（含 libdns/cloudflare） | v0.2.4 | Apache-2.0（libdns/cloudflare：MIT） |
+
+### 安卓 App / Android app (`android/`)
+
+APK 由 GitHub Actions 或用户自行用 Android SDK 构建（Gradle + Android Gradle Plugin，Apache-2.0）。App 只使用 Android 框架 API，
+APK 中唯一打包的第三方库是 [Kotlin 标准库](https://github.com/JetBrains/kotlin)（Apache-2.0）；JUnit（EPL-1.0）仅用于单元测试，不进入 APK。
 
 ## 文档中推荐、由用户自行安装的软件 / Software recommended in the docs
 

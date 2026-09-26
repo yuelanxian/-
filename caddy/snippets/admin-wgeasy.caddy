@@ -1,6 +1,8 @@
 # wg-easy 管理界面：https://HV_HOST:HV_ADMIN_PORT（与主站共用证书）。
 # wg-easy 自带登录 + 两步验证（请务必开启）；Caddy 只做 IP 兜底过滤。
 https://{$HV_HOST}:{$HV_ADMIN_PORT} {
+	import access_log
+
 	route {
 		@outside not remote_ip {$HV_ALLOWED_CIDRS}
 		abort @outside

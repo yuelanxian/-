@@ -1,4 +1,4 @@
-# Smoke test only: Nextcloud on :38443, panel on :38444 (same IP guard as the real Caddyfile)
+# Smoke test only: Nextcloud on :SMOKE_NC_PORT, panel on :SMOKE_PANEL_PORT (same IP guard as the real Caddyfile)
 {
 	admin off
 	skip_install_trust
@@ -9,11 +9,11 @@
 	}
 }
 
-https://127.0.0.1:38443 {
+https://127.0.0.1:{$SMOKE_NC_PORT} {
 	reverse_proxy app:80
 }
 
-https://127.0.0.1:38444 {
+https://127.0.0.1:{$SMOKE_PANEL_PORT} {
 	route {
 		@outside not remote_ip private_ranges 100.64.0.0/10
 		abort @outside

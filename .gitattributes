@@ -1,4 +1,5 @@
-# 统一换行符：容器内执行的脚本与配置必须是 LF（Windows 的 core.autocrlf 会破坏它们）
+# 统一换行符：容器内执行的脚本与配置必须是 LF（Windows 的 core.autocrlf 会破坏它们）；
+# systemd 单元（*.service / *.timer / *.path）同样必须是 LF。
 * text=auto
 
 *.sh           text eol=lf
@@ -24,6 +25,16 @@ Dockerfile     text eol=lf
 go.mod         text eol=lf
 go.sum         text eol=lf
 *.tmpl         text eol=lf
+*.path         text eol=lf
+*.webmanifest  text eol=lf
+*.mjs          text eol=lf
+*.py           text eol=lf
+*.kt           text eol=lf
+*.kts          text eol=lf
+*.xml          text eol=lf
+*.properties   text eol=lf
+*.pro          text eol=lf
+gradlew        text eol=lf
 LICENSE        text eol=lf
 .gitattributes text eol=lf
 .gitignore     text eol=lf
@@ -35,9 +46,17 @@ LICENSE        text eol=lf
 *.psd1         text eol=crlf
 *.cmd          text eol=crlf
 *.bat          text eol=crlf
+gradlew.bat    text eol=crlf
 
 # 二进制
 *.png          binary
 *.jpg          binary
+*.webp         binary
 *.ico          binary
 *.pdf          binary
+*.jar          binary
+*.apk          binary
+*.jks          binary
+*.keystore     binary
+*.gz           binary
+*.zip          binary

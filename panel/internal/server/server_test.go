@@ -740,3 +740,30 @@ func TestTrimToBytes(t *testing.T) {
 		t.Fatalf("%v %v", got, cut)
 	}
 }
+
+func TestStorageFallsBackToHostDisks(t *testing.T) {
+	h := newHarness(t)
+	h.loginFlow()
+	if err := os.RemoveAll(filepath.Join(h.root, "stat")); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(h.root, "state", "status.json"), []byte(`{"generated":"2026-09-26T03:00:00+08:00","platform":"windows",`+
+		`"disks":[{"role":"主数据","name":"Nextcloud 数据","path":"D:\\HomeVault\\nextcloud-data","total":1000,"free":50,"mounted":true},`+
+		`{"role":"backup","name":"restic 仓库","path":"E:\\Backup","total":0,"free":0,"mounted":false}]}`), 0o644)
+	m := decode(t, h.do("GET", "/api/storage", nil))
+	disks := m["disks"].([]any)
+	if m["disks_source"] != "host" || len(disks) != 2 {
+		t.Fatalf("storage %v", m)
+	}
+	d0 := disks[0].(map[string]any)
+	if d0["role"] != "data" || d0["used"] != float64(950) || d0["used_pct"] != float64(95) || d0["host_path"] != `D:\HomeVault\nextcloud-data` {
+		t.Fatalf("disk0 %v", d0)
+	}
+	if disks[1].(map[string]any)["error"] == nil {
+		t.Fatalf("disk1 %v", disks[1])
+	}
+	alerts, _ := json.Marshal(m["alerts"])
+	if !strings.Contains(string(alerts), "10%") {
+		t.Fatalf("low-space alert missing: %s", alerts)
+	}
+}

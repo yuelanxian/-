@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// Canonical host → panel status files. The json tags below are the CANONICAL field names that
+// scripts/ (Linux) and windows/lib/ (Windows) must emit. For robustness the decoders also accept
+// a few older spellings (listed in each UnmarshalJSON); writers must not rely on them.
+
 // Status is state/status.json (written by `hv maintenance` / `hv.ps1 maintenance`).
 type Status struct {
 	Updated          FlexTime `json:"updated"`
@@ -22,6 +26,42 @@ type Status struct {
 	Requests struct {
 		LastRun FlexTime `json:"last_run"`
 	} `json:"requests"`
+	// Disks is optional: host-side disk usage, used by the panel only when no /stat mounts exist.
+	Disks []HostDisk `json:"disks,omitempty"`
+}
+
+// HostDisk is one entry of Status.Disks (sizes in bytes).
+type HostDisk struct {
+	Role    string `json:"role"` // data | storage | backup | system (Chinese labels 主数据/扩展存储/备份/系统数据 accepted)
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Total   int64  `json:"total"`
+	Free    int64  `json:"free"`
+	Mounted *bool  `json:"mounted,omitempty"`
+}
+
+// UnmarshalJSON decodes the canonical shape and accepts the aliases generated/updated_at (updated)
+// and homevault_version (version).
+func (s *Status) UnmarshalJSON(b []byte) error {
+	type plain Status
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	var alt struct {
+		Generated FlexTime `json:"generated"`
+		UpdatedAt FlexTime `json:"updated_at"`
+		HVVersion string   `json:"homevault_version"`
+	}
+	_ = json.Unmarshal(b, &alt)
+	if p.Updated.IsZero() {
+		p.Updated = firstTime(alt.Generated, alt.UpdatedAt)
+	}
+	if p.Version == "" {
+		p.Version = alt.HVVersion
+	}
+	*s = Status(p)
+	return nil
 }
 
 // BackupStats are restic summary numbers of the last backup.
@@ -47,7 +87,57 @@ type BackupStatus struct {
 	Repository      string       `json:"repository"`
 	Schedule        string       `json:"schedule"`
 	NextRun         FlexTime     `json:"next_run"`
+	ExitCode        *int         `json:"exit_code,omitempty"`
 	Stats           *BackupStats `json:"stats,omitempty"`
+}
+
+// UnmarshalJSON decodes the canonical shape and accepts the aliases result/status (state),
+// finished (last_finished), last_ok (last_success), log (log_file) and generated (updated).
+func (s *BackupStatus) UnmarshalJSON(b []byte) error {
+	type plain BackupStatus
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	var alt struct {
+		Result    string   `json:"result"`
+		Status    string   `json:"status"`
+		Finished  FlexTime `json:"finished"`
+		LastOK    FlexTime `json:"last_ok"`
+		Log       string   `json:"log"`
+		Generated FlexTime `json:"generated"`
+	}
+	_ = json.Unmarshal(b, &alt)
+	if p.State == "" {
+		p.State = alt.Result
+	}
+	if p.State == "" {
+		p.State = alt.Status
+	}
+	p.State = strings.ToLower(strings.TrimSpace(p.State))
+	if p.LastFinished.IsZero() {
+		p.LastFinished = alt.Finished
+	}
+	if p.LastSuccess.IsZero() {
+		p.LastSuccess = alt.LastOK
+	}
+	if p.LogFile == "" {
+		p.LogFile = alt.Log
+	}
+	if p.Updated.IsZero() {
+		p.Updated = alt.Generated
+	}
+	*s = BackupStatus(p)
+	return nil
+}
+
+func firstTime(ts ...FlexTime) FlexTime {
+	for _, t := range ts {
+		if !t.IsZero() {
+			return t
+		}
+	}
+	return FlexTime{}
 }
 
 // Snapshot is one entry of `restic snapshots --json` (state/snapshots.json).
@@ -94,7 +184,7 @@ func (v *VPNStatus) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*v = VPNStatus{}
-	_ = json.Unmarshal(pick(raw, "updated", "updated_at", "time"), &v.Updated)
+	_ = json.Unmarshal(pick(raw, "updated", "updated_at", "generated", "time"), &v.Updated)
 	v.Platform = str(pick(raw, "platform"))
 	v.Interface = str(pick(raw, "interface", "device"))
 	v.ListenPort = int(num(pick(raw, "listen_port", "port")))

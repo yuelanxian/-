@@ -2,10 +2,16 @@
 import { api } from '../api.js';
 import { h, clear, icon } from '../ui.js';
 
+// Inside the HomeVault Android app (User-Agent contains "HomeVaultApp/") every navigation to another
+// origin — such as the Nextcloud login page — is opened in the phone's browser while this page stays
+// open and keeps polling. In a normal browser the login page opens in a new tab.
+const IN_APP = /\bHomeVaultApp\//.test(navigator.userAgent);
+
 export function renderLogin(view, { onSuccess }) {
   let timer = null;
   let stopped = false;
   let mode = '';
+  let where = IN_APP ? 'app' : 'tab';
 
   const card = h('div.card');
   view.appendChild(h('div.login-wrap',
@@ -30,12 +36,26 @@ export function renderLogin(view, { onSuccess }) {
     btn.addEventListener('click', async () => {
       btn.disabled = true;
       clear(err);
+      // Open the tab synchronously (still inside the click gesture) so popup blockers allow it.
+      let win = null;
+      if (!IN_APP) {
+        try { win = window.open('', '_blank'); } catch { win = null; }
+      }
       try {
         const r = await api.post('/api/auth/flow');
+        if (win && !win.closed) {
+          try { win.opener = null; } catch { /* ignore */ }
+          win.location.href = r.login_url;
+          where = 'tab';
+        } else {
+          // App: intercepted and opened in the phone's browser. Browser with blocked popups:
+          // same window; the server keeps polling and the back button returns here.
+          where = IN_APP ? 'app' : 'same';
+          window.location.assign(r.login_url);
+        }
         showWaiting(r.login_url);
-        // Same window: the panel keeps polling server-side; come back with the back button.
-        window.location.assign(r.login_url);
       } catch (e) {
+        if (win) { try { win.close(); } catch { /* ignore */ } }
         btn.disabled = false;
         err.appendChild(h('div.alert.err', icon('alert'), h('div.grow', e.message)));
       }
@@ -79,7 +99,8 @@ export function renderLogin(view, { onSuccess }) {
   function showWaiting(loginUrl) {
     if (mode === 'waiting') return;
     mode = 'waiting';
-    const reopen = h('button.btn.primary.block', { type: 'button', onclick: () => window.location.assign(loginUrl) }, '打开 Nextcloud 登录页');
+    // A real link: never blocked, and inside the app it is handed to the phone's browser.
+    const reopen = h('a.btn.primary.block', { href: loginUrl, target: '_blank', rel: 'noopener noreferrer' }, '重新打开 Nextcloud 登录页');
     const cancel = h('button.btn.block', { type: 'button' }, '取消');
     cancel.addEventListener('click', async () => {
       stopped = false;
@@ -90,7 +111,11 @@ export function renderLogin(view, { onSuccess }) {
       h('div.waiting',
         h('div.spinner'),
         h('strong', '正在等待 Nextcloud 登录完成…'),
-        h('div.muted.small', '请在 Nextcloud 页面登录（包括两步验证）并点击「授予访问权限」，然后返回本页面（按返回键）。本页会自动进入管理面板。'),
+        h('div.muted.small', {
+          app: '已在手机浏览器中打开 Nextcloud 登录页。请在浏览器中登录（包括两步验证）并点击「授予访问权限」，然后切换回本应用，会自动进入管理面板。',
+          tab: '已在新标签页打开 Nextcloud 登录页。请在那里登录（包括两步验证）并点击「授予访问权限」，然后回到本页面，会自动进入管理面板。',
+          same: '请在 Nextcloud 页面登录（包括两步验证）并点击「授予访问权限」，然后按返回键回到本页面，会自动进入管理面板。',
+        }[where]),
         h('div.muted.small', '安全提示：只在自己发起登录时授权；授权页显示的名称应为「HomeVault 管理面板（本设备的 IP）」。')),
       h('div.btn-row', reopen, cancel));
     schedule(2000);

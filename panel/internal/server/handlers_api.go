@@ -156,7 +156,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request, sess *au
 		}
 	}
 
-	disks := diskstat.Collect(s.cfg.StatDir, diskstat.LoadStorageConf(s.cfg.StorageConf))
+	disks, _ := s.collectDisks(diskstat.LoadStorageConf(s.cfg.StorageConf))
 	alerts = append(alerts, diskAlerts(disks)...)
 
 	bv := s.backupView()
@@ -235,6 +235,54 @@ func (s *Server) dockerInfo(ctx context.Context) (*docker.Info, error) {
 	return info, nil
 }
 
+// collectDisks stats the /stat mounts; when none are mounted it falls back to the optional
+// "disks" array of state/status.json written by the host. source is "panel", "host" or "".
+func (s *Server) collectDisks(conf []diskstat.StorageEntry) ([]diskstat.Disk, string) {
+	disks := diskstat.Collect(s.cfg.StatDir, conf)
+	if len(disks) > 0 {
+		return disks, "panel"
+	}
+	var st hoststate.Status
+	if _, err := s.state.ReadJSON("status.json", &st); err != nil || len(st.Disks) == 0 {
+		return disks, ""
+	}
+	for _, hd := range st.Disks {
+		role, lbl := hostDiskRole(hd.Role)
+		d := diskstat.Disk{Role: role, RoleLabel: lbl, Name: hd.Name, HostPath: hd.Path}
+		if d.Name == "" {
+			d.Name = lbl
+		}
+		switch {
+		case hd.Mounted != nil && !*hd.Mounted:
+			d.Error = "目录不存在或硬盘未连接"
+		case hd.Total <= 0:
+			d.Error = "无法读取磁盘信息"
+		default:
+			free := max(hd.Free, 0)
+			d.Total, d.Free = uint64(hd.Total), uint64(min(free, hd.Total))
+			d.Used = d.Total - d.Free
+			d.UsedPct = float64(int64(float64(d.Used)*1000/float64(d.Total)+0.5)) / 10
+			d.FreePct = float64(int64((100-d.UsedPct)*10+0.5)) / 10
+		}
+		disks = append(disks, d)
+	}
+	return disks, "host"
+}
+
+func hostDiskRole(r string) (string, string) {
+	switch strings.ToLower(strings.TrimSpace(r)) {
+	case "data", "主数据":
+		return diskstat.RoleData, diskstat.RoleLabel[diskstat.RoleData]
+	case "storage", "扩展存储":
+		return diskstat.RoleStorage, diskstat.RoleLabel[diskstat.RoleStorage]
+	case "backup", "备份":
+		return diskstat.RoleBackup, diskstat.RoleLabel[diskstat.RoleBackup]
+	case "system", "系统数据":
+		return "system", "系统数据"
+	}
+	return "other", r
+}
+
 func diskAlerts(disks []diskstat.Disk) []alert {
 	var out []alert
 	for _, d := range disks {
@@ -300,8 +348,8 @@ func (s *Server) handleStorage(w http.ResponseWriter, r *http.Request, sess *aut
 	defer cancel()
 	ip := s.clientIP(r)
 	conf := diskstat.LoadStorageConf(s.cfg.StorageConf)
-	disks := diskstat.Collect(s.cfg.StatDir, conf)
-	resp := map[string]any{"disks": nonNil(disks), "alerts": nonNil(diskAlerts(disks))}
+	disks, source := s.collectDisks(conf)
+	resp := map[string]any{"disks": nonNil(disks), "disks_source": source, "alerts": nonNil(diskAlerts(disks))}
 
 	if v, ok := s.cache.get("users"); ok {
 		resp["users"] = v

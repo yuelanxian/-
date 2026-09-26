@@ -9,6 +9,7 @@
 /clients/
 /data/
 /restore/
+/logs/
 
 # 编辑器 / 系统
 .DS_Store
@@ -18,3 +19,8 @@ desktop.ini
 *~
 .idea/
 .vscode/
+
+# 测试 / 构建产物（安卓的构建产物见 android/.gitignore）
+node_modules/
+__pycache__/
+*.apk

@@ -4,7 +4,7 @@ import { h, clear, icon, fmtBytes, fmtNum, fmtTime, relTime, fmtDuration, spinne
 import { backupStateText } from './overview.js';
 
 export function requestStateBadge(r) {
-  const map = { pending: ['info', '等待主机执行'], running: ['info', '执行中'], ok: ['ok', '成功'], failed: ['err', '失败'], rejected: ['err', '被拒绝'] };
+  const map = { pending: ['info', '等待主机执行'], running: ['info', '执行中'], ok: ['ok', '成功'], failed: ['err', '失败'], rejected: ['err', '被拒绝'], unknown: ['warn', '结果未知'] };
   const [cls, txt] = map[r.state] || ['', r.state];
   return h('span.badge', { class: cls }, txt);
 }

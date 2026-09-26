@@ -211,7 +211,7 @@ type RequestStatus struct {
 	ID          string    `json:"id"`
 	Type        string    `json:"type"`
 	Days        int       `json:"days,omitempty"`
-	State       string    `json:"state"` // pending | ok | failed | rejected
+	State       string    `json:"state"` // pending | running | ok | failed | rejected | unknown
 	Created     *FlexTime `json:"created,omitempty"`
 	Finished    *FlexTime `json:"finished,omitempty"`
 	Message     string    `json:"message,omitempty"`
@@ -322,7 +322,7 @@ func writeAtomic(dir, name string, data []byte) error {
 }
 
 func (s *Store) pendingLocked() ([]RequestStatus, error) {
-	return readRequestDir(filepath.Join(s.Dir, requestsDir), "pending")
+	return readRequestDir(filepath.Join(s.Dir, requestsDir), true, s.Now())
 }
 
 // Requests returns pending requests and the most recent finished ones (newest first).
@@ -330,74 +330,170 @@ func (s *Store) Requests(doneLimit int) (pending, done []RequestStatus) {
 	s.mu.Lock()
 	pending, _ = s.pendingLocked()
 	s.mu.Unlock()
-	done, _ = readRequestDir(filepath.Join(s.Dir, requestsDir, doneDir), "")
+	done, _ = readRequestDir(filepath.Join(s.Dir, requestsDir, doneDir), false, s.Now())
 	if len(done) > doneLimit {
 		done = done[:doneLimit]
 	}
 	return pending, done
 }
 
-func readRequestDir(dir, defaultState string) ([]RequestStatus, error) {
+// resultSuffix marks a result file written by the host runner next to the moved request:
+// done/<id>.json (the original request) + done/<id>.result.json ({"ok":bool,"finished","message"}).
+const resultSuffix = ".result.json"
+
+// A request moved to done/ without any result for this long is reported as "unknown".
+const staleRunning = 6 * time.Hour
+
+type rawRequest struct {
+	ID          string          `json:"id"`
+	Request     string          `json:"request"`
+	Type        string          `json:"type"`
+	Days        any             `json:"days"`
+	Created     *FlexTime       `json:"created"`
+	Finished    *FlexTime       `json:"finished"`
+	FinishedAt  *FlexTime       `json:"finished_at"`
+	OK          json.RawMessage `json:"ok"`
+	Status      string          `json:"status"`
+	Result      string          `json:"result"`
+	State       string          `json:"state"`
+	Message     string          `json:"message"`
+	Error       string          `json:"error"`
+	RequestedBy string          `json:"requested_by"`
+}
+
+func (r *rawRequest) outcome() string {
+	switch strings.Trim(strings.TrimSpace(string(r.OK)), `"`) {
+	case "true", "1":
+		return "ok"
+	case "false", "0":
+		return "failed"
+	}
+	for _, v := range []string{r.Status, r.Result, r.State} {
+		if v != "" {
+			return normState(v)
+		}
+	}
+	return ""
+}
+
+func readRequestDir(dir string, pendingDir bool, now time.Time) ([]RequestStatus, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(ents))
+	type pair struct{ req, res string }
+	byKey := map[string]*pair{}
 	for _, e := range ents {
 		n := e.Name()
-		if e.Type().IsRegular() && strings.HasSuffix(n, ".json") && !strings.HasPrefix(n, ".") {
-			names = append(names, n)
+		if !e.Type().IsRegular() || !strings.HasSuffix(n, ".json") || strings.HasPrefix(n, ".") {
+			continue
+		}
+		key, isResult := strings.TrimSuffix(n, ".json"), false
+		if strings.HasSuffix(n, resultSuffix) {
+			if pendingDir {
+				continue
+			}
+			key, isResult = strings.TrimSuffix(n, resultSuffix), true
+		}
+		p := byKey[key]
+		if p == nil {
+			p = &pair{}
+			byKey[key] = p
+		}
+		if isResult {
+			p.res = n
+		} else {
+			p.req = n
 		}
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
-	if len(names) > 200 {
-		names = names[:200]
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
+	if len(keys) > 200 {
+		keys = keys[:200]
 	}
 	var out []RequestStatus
-	for _, n := range names {
-		b, err := readSmall(filepath.Join(dir, n))
-		if err != nil {
+	for _, k := range keys {
+		p := byKey[k]
+		var req, res rawRequest
+		haveReq, haveRes := false, false
+		if p.req != "" {
+			haveReq = decodeRequestFile(filepath.Join(dir, p.req), &req)
+		}
+		if p.res != "" {
+			haveRes = decodeRequestFile(filepath.Join(dir, p.res), &res)
+		}
+		if !haveReq && !haveRes {
 			continue
 		}
-		var raw struct {
-			ID          string    `json:"id"`
-			Type        string    `json:"type"`
-			Days        any       `json:"days"`
-			Created     *FlexTime `json:"created"`
-			Finished    *FlexTime `json:"finished"`
-			Status      string    `json:"status"`
-			Result      string    `json:"result"`
-			Message     string    `json:"message"`
-			RequestedBy string    `json:"requested_by"`
+		rs := RequestStatus{ID: firstNonEmpty(req.ID, res.ID, req.Request, strings.TrimSuffix(res.Request, ".json"), k),
+			Type: firstNonEmpty(req.Type, res.Type), Created: req.Created, RequestedBy: req.RequestedBy}
+		if rs.Type == "unknown" {
+			rs.Type = ""
 		}
-		if json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &raw) != nil {
-			continue
-		}
-		st := raw.Status
-		if st == "" {
-			st = raw.Result
-		}
-		if st == "" {
-			st = defaultState
-		}
-		if st == "" {
-			st = "ok"
-		}
-		id := raw.ID
-		if id == "" {
-			id = strings.TrimSuffix(n, ".json")
-		}
-		rs := RequestStatus{ID: id, Type: raw.Type, State: normState(st), Created: raw.Created, Finished: raw.Finished,
-			Message: raw.Message, RequestedBy: raw.RequestedBy}
-		switch v := raw.Days.(type) {
+		switch v := req.Days.(type) {
 		case float64:
 			rs.Days = int(v)
 		case string:
 			rs.Days, _ = strconv.Atoi(v)
 		}
+		// Outcome: result file first, then status fields written into the request file itself.
+		state := ""
+		if haveRes {
+			state = res.outcome()
+			rs.Finished = firstFlex(res.Finished, res.FinishedAt)
+			rs.Message = firstNonEmpty(res.Message, res.Error)
+			if state == "" {
+				state = "ok"
+			}
+		}
+		if state == "" && haveReq {
+			state = req.outcome()
+			rs.Finished = firstFlex(req.Finished, req.FinishedAt)
+			rs.Message = firstNonEmpty(req.Message, req.Error)
+		}
+		switch {
+		case pendingDir:
+			state = "pending"
+		case state == "":
+			// Moved to done/ but no result yet: the host is executing it (or crashed doing so).
+			state = "running"
+			if rs.Created != nil && !rs.Created.IsZero() && now.Sub(rs.Created.Time) > staleRunning {
+				state = "unknown"
+			}
+		}
+		rs.State = state
 		out = append(out, rs)
 	}
 	return out, nil
+}
+
+func decodeRequestFile(p string, out *rawRequest) bool {
+	b, err := readSmall(p)
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), out) == nil
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func firstFlex(ts ...*FlexTime) *FlexTime {
+	for _, t := range ts {
+		if t != nil && !t.IsZero() {
+			return t
+		}
+	}
+	return nil
 }
 
 func normState(s string) string {

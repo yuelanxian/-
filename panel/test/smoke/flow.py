@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Drive a real Nextcloud Login Flow v2 through the HomeVault panel (browser simulation)."""
-import base64, http.cookiejar, json, re, ssl, sys, time, urllib.parse, urllib.request
+import base64, http.cookiejar, json, os, re, ssl, sys, time, urllib.parse, urllib.request
 
-PANEL = "https://127.0.0.1:38444"
-NC = "https://127.0.0.1:38443"
+PANEL = "https://127.0.0.1:%s" % os.environ.get("SMOKE_PANEL_PORT", "19444")
+NC = "https://127.0.0.1:%s" % os.environ.get("SMOKE_NC_PORT", "19443")
 ctx = ssl.create_default_context(cafile="root.crt")
 
 
