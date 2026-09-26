@@ -129,8 +129,12 @@ test_write_derived_updates_env_file() {
 	printf '# 派生变量\nHV_SITE_ADDRESSES=\nHV_TRUSTED_DOMAINS=\nOTHER=1\n' >"$HV_ENV_FILE"
 	HV_PLATFORM=linux HV_HOST=10.1.2.3 HV_EXTRA_HOSTS='' HV_HTTPS_PORT=443 HV_TLS_MODE=internal HV_VPN_ENABLED=true
 	HV_DNS_PROVIDER=alidns HV_VPN_CIDR=10.99.77.0/24
+	HV_FRONTEND_SUBNET=172.31.250.0/24
 	hv_write_derived
 	assert_eq 'https://10.1.2.3:443' "$(env_get_file HV_SITE_ADDRESSES "$HV_ENV_FILE")"
+	assert_eq 172.31.250.2 "$(env_get_file HV_CADDY_IP "$HV_ENV_FILE")"
+	assert_eq 172.31.250.3 "$(env_get_file HV_PANEL_IP "$HV_ENV_FILE")"
+	assert_eq 172.31.250.128/25 "$(env_get_file HV_FRONTEND_IP_RANGE "$HV_ENV_FILE")"
 	assert_eq wgeasy "$(env_get_file HV_ADMIN_SNIPPET "$HV_ENV_FILE")"
 	assert_eq '# 派生变量' "$(head -n1 "$HV_ENV_FILE")"
 	assert_eq 1 "$(env_get_file OTHER "$HV_ENV_FILE")"
@@ -170,6 +174,7 @@ test_host_normalize_and_validate() {
 	for h in 'a b@c.cn' 'a@b' '@b.cn' "a'@b.cn" 'a@b.cn}'; do assert_fail valid_email "$h"; done
 	HV_HOST=192.168.1.10 HV_TLS_MODE=internal HV_HTTP_PORT=80 HV_HTTPS_PORT=443 HV_ADMIN_PORT=8443 HV_PANEL_PORT=9443
 	HV_LOG_RETENTION_DAYS=7 HV_EXTRA_HOSTS='' HV_BIND_IP=192.168.1.10 HV_PLATFORM=linux HV_VPN_ENABLED=true WG_HOST=vpn.example.com
+	HV_FRONTEND_SUBNET=172.31.250.0/24
 	assert_ok hv_validate_env
 	HV_EXTRA_HOSTS='nas.lan https://oops' assert_fail hv_validate_env
 	HV_BIND_IP='::' assert_fail hv_validate_env
